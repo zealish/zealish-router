@@ -61,9 +61,14 @@ curl -X PUT $ADMIN/providers/ollama \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"kind":"ollama","base_url":"http://localhost:11434/v1","timeout_ms":300000,"enabled":true}'
 
+curl -X PUT $ADMIN/models/local \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"provider":"ollama","model":"llama3.1"}'
+
+# fallback lists other *aliases*, tried in order after the primary fails
 curl -X PUT $ADMIN/models/gpt-4o \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"provider":"openai","model":"gpt-4o","fallback":["ollama"]}'
+  -d '{"provider":"openai","model":"gpt-4o","fallback":["local"]}'
 ```
 
 Check the routing table:
@@ -210,12 +215,14 @@ The router must have `admin.enabled: true` and list the dashboard origin under
 
 ## Routing and fallback
 
-A model alias names a primary provider plus an ordered fallback chain. On a
-retryable failure (timeout, rate limit, 5xx, connection error) the router
-retries the same provider with exponential backoff and jitter, then advances to
-the next provider in the chain. A 4xx response is returned immediately without
-fallback. For streaming, fallback is only possible before the first chunk is
-flushed; once bytes are on the wire the response is committed.
+A model alias names a provider and an upstream model, plus an ordered chain of
+other **aliases** to fall back to. On a retryable failure (timeout, rate limit,
+5xx, connection error) the router retries the same provider with exponential
+backoff and jitter, then advances to the next alias in the chain — which may
+point at an entirely different provider and model. A 4xx response is returned
+immediately without fallback. For streaming, fallback is only possible before
+the first chunk is flushed; once bytes are on the wire the response is
+committed.
 
 ---
 

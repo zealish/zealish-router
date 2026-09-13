@@ -1,7 +1,9 @@
 BINARY  := zealish-router
 PKG     := ./...
 BIN_DIR := bin
-VERSION ?= 0.1.0
+# Derived from the nearest tag so a local build never claims a stale version.
+# goreleaser and the image build stamp their own value.
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
 PLATFORMS := linux/amd64,linux/arm64

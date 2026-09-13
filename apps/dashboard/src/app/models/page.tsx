@@ -178,7 +178,7 @@ export default function ModelsPage() {
               {editing ? `Edit ${draft?.alias}` : "Add alias"}
             </DialogTitle>
             <DialogDescription>
-              Fallback providers are tried in order when an attempt fails with a
+              Fallback aliases are tried in order when an attempt fails with a
               retryable error.
             </DialogDescription>
           </DialogHeader>
@@ -232,17 +232,26 @@ export default function ModelsPage() {
                 />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="fallback">Fallback providers</Label>
+                <Label htmlFor="fallback">Fallback aliases</Label>
                 <Input
                   id="fallback"
                   value={draft.fallback}
-                  placeholder="openrouter, ollama"
+                  placeholder="local, cheap"
                   onChange={(e) =>
                     setDraft({ ...draft, fallback: e.target.value })
                   }
+                  list="alias-options"
                 />
+                <datalist id="alias-options">
+                  {(data ?? [])
+                    .filter((m) => m.alias !== draft.alias)
+                    .map((m) => (
+                      <option key={m.alias} value={m.alias} />
+                    ))}
+                </datalist>
                 <p className="text-muted-foreground text-xs">
-                  Comma-separated provider names.
+                  Comma-separated aliases, not provider names. Each one is a
+                  full route, so a fallback may use a different model entirely.
                 </p>
               </div>
             </form>
