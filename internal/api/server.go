@@ -59,7 +59,7 @@ func newRoutes(deps Dependencies, h *handler) http.Handler {
 
 	r.Use(chimw.RequestID)
 	r.Use(chimw.RealIP)
-	r.Use(chimw.Recoverer)
+	r.Use(recoverer(deps.Logger))
 	r.Use(requestLogger(deps.Logger))
 	r.Use(instrument(deps.Metrics))
 
@@ -67,6 +67,7 @@ func newRoutes(deps Dependencies, h *handler) http.Handler {
 	r.Handle("/metrics", deps.Metrics.Handler())
 
 	r.Route("/v1", func(v1 chi.Router) {
+		v1.Use(limitBody(deps.Config.Server.MaxBodyBytes))
 		v1.Use(authenticate(deps.Auth))
 		v1.Get("/models", h.listModels)
 		v1.Post("/chat/completions", h.chatCompletions)
@@ -76,6 +77,7 @@ func newRoutes(deps Dependencies, h *handler) http.Handler {
 		admin := newAdminHandler(deps)
 		r.Route("/api/v1", func(api chi.Router) {
 			api.Use(cors(deps.Config.Admin.Origins))
+			api.Use(limitBody(deps.Config.Server.MaxBodyBytes))
 			api.Use(authenticate(deps.AdminAuth))
 			admin.routes(api)
 		})

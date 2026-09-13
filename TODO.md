@@ -193,18 +193,18 @@ Legend: `[x]` done · `[ ]` pending · `~` partial (scaffold only, no logic)
 - [ ] `.goreleaser.yaml` or make target for tagged release binaries
 
 ### Hardening
-- [ ] Request body size limit on `/v1/chat/completions`
+- [x] Request body size limit — `server.max_body_bytes` (default 4 MiB) enforced by `limitBody` on `/v1` and `/api/v1`, oversized bodies get a 413 JSON envelope
 - [ ] Per-key rate limiting (decide: in-scope or post-1.0)
-- [ ] Panic recovery verified to not leak internals to clients
-- [ ] Redact API keys from all log output
-- [ ] `-race` test run in CI
+- [x] Panic recovery verified to not leak internals to clients — own `recoverer` replaces chi's, logs panic + stack, writes a generic 500 envelope, re-panics on `http.ErrAbortHandler`
+- [x] Redact API keys from all log output — `provider.redact` strips the credential from upstream and transport error messages, which feed both logs and client responses
+- [x] `-race` test run in CI
 
 ### Repo hygiene
 - [x] `LICENSE` — Apache-2.0 (PRD header)
 - [x] `README.md` — quickstart, config reference, coding-agent setup examples
 - [x] `.gitignore` — `bin/`, `data/`, `.env`
-- [ ] `.github/workflows/ci.yml` — build, vet, test, gofmt check
-- [ ] `.golangci.yml`
+- [x] `.github/workflows/ci.yml` — gofmt, vet, build, `test -race`, golangci-lint
+- [x] `.golangci.yml` — errcheck, errorlint, revive, staticcheck, bodyclose, noctx; repo is lint-clean
 - [ ] `CONTRIBUTING.md`
 
 ---
@@ -223,4 +223,4 @@ Legend: `[x]` done · `[ ]` pending · `~` partial (scaffold only, no logic)
 
 ## Next Action
 
-**v1.0 — hardening, packaging, dashboard.** The backend is complete and the repo is now under version control with `README.md` and `LICENSE` in place. Remaining, in order: backend hardening (request body size limit, API-key redaction in logs, panic-recovery leak check), CI (`build`/`vet`/`test -race`/gofmt) plus `.golangci.yml`, packaging (compose, multi-arch, systemd, RPM, goreleaser), then the Next.js dashboard in `apps/dashboard` consuming `/api/v1`.
+**v1.0 — packaging, then dashboard.** Backend, hardening and CI are done: the repo is lint-clean, tested under `-race`, has a request body cap, a non-leaking panic recovery path and credential redaction in provider errors. Remaining: packaging (`docker/compose.yaml`, multi-arch build, systemd unit, RPM spec, goreleaser), `CONTRIBUTING.md`, the per-key rate-limiting decision (Open Decision #4), and the Next.js dashboard in `apps/dashboard` consuming `/api/v1`.

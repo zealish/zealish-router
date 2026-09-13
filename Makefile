@@ -4,7 +4,7 @@ BIN_DIR := bin
 VERSION ?= 0.1.0
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: all build run test vet fmt tidy clean docker
+.PHONY: all build run test race lint vet fmt tidy clean docker
 
 all: build
 
@@ -17,6 +17,12 @@ run:
 
 test:
 	go test $(PKG)
+
+race:
+	go test -race $(PKG)
+
+lint:
+	golangci-lint run $(PKG)
 
 vet:
 	go vet $(PKG)

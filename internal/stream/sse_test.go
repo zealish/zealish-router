@@ -2,6 +2,7 @@ package stream
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -17,7 +18,7 @@ type chunk struct {
 type unflushable struct{ http.ResponseWriter }
 
 func TestNewWriterRequiresFlusher(t *testing.T) {
-	if _, err := NewWriter(unflushable{httptest.NewRecorder()}); err != ErrUnsupported {
+	if _, err := NewWriter(unflushable{httptest.NewRecorder()}); !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("err = %v, want ErrUnsupported", err)
 	}
 }
@@ -111,7 +112,7 @@ func TestRelayStopsOnContextCancel(t *testing.T) {
 
 	select {
 	case err := <-done:
-		if err != context.Canceled {
+		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("err = %v, want context.Canceled", err)
 		}
 	case <-time.After(2 * time.Second):

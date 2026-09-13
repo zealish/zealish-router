@@ -43,7 +43,7 @@ func (h *handler) listModels(w http.ResponseWriter, _ *http.Request) {
 func (h *handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	var req openai.ChatCompletionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request_error", "Malformed JSON body.")
+		writeDecodeError(w, err, "Malformed JSON body.")
 		return
 	}
 	if req.Model == "" {

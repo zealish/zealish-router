@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -150,7 +151,7 @@ func TestChatCompletionStreamContextCancel(t *testing.T) {
 	case _, open := <-ch:
 		if open {
 			// Drain until closed; the channel must not stay open.
-			for range ch {
+			for range ch { //nolint:revive // draining is the point
 			}
 		}
 	case <-time.After(2 * time.Second):
@@ -237,6 +238,44 @@ func TestConnectionErrorMapping(t *testing.T) {
 	_, err := p.ChatCompletion(context.Background(), testRequest())
 	if !errors.Is(err, ErrConnection) {
 		t.Fatalf("err = %v, want ErrConnection", err)
+	}
+}
+
+func TestUpstreamErrorRedactsAPIKey(t *testing.T) {
+	p, _ := newTestProvider(t, "openai", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		writeJSON(t, w, openai.ErrorResponse{
+			Error: openai.Error{Message: "Incorrect API key provided: sk-test.", Type: "invalid_request_error"},
+		})
+	})
+
+	_, err := p.ChatCompletion(context.Background(), testRequest())
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if strings.Contains(err.Error(), "sk-test") {
+		t.Errorf("api key leaked in error: %q", err)
+	}
+	if !strings.Contains(err.Error(), redactionPlaceholder) {
+		t.Errorf("error = %q, want the redaction placeholder", err)
+	}
+}
+
+func TestTransportErrorRedactsAPIKey(t *testing.T) {
+	// A transport error embeds the request URL; a key in it must not survive.
+	p := NewOpenAI(Options{
+		Name:       "openai",
+		BaseURL:    "http://127.0.0.1:1/sk-secret",
+		APIKey:     "sk-secret",
+		HTTPClient: &http.Client{},
+	})
+
+	_, err := p.ChatCompletion(context.Background(), testRequest())
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if strings.Contains(err.Error(), "sk-secret") {
+		t.Errorf("api key leaked in error: %q", err)
 	}
 }
 

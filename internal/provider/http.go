@@ -68,7 +68,8 @@ func (p *httpProvider) ChatCompletionStream(ctx context.Context, req *openai.Cha
 	body := *req
 	body.Stream = true
 
-	resp, err := p.post(ctx, &body, true)
+	// The body is closed by the pump goroutine below, which bodyclose cannot see.
+	resp, err := p.post(ctx, &body, true) //nolint:bodyclose
 	if err != nil {
 		return nil, err
 	}
@@ -180,7 +181,7 @@ func (p *httpProvider) transportError(_ context.Context, err error) error {
 	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
 		kind = ErrTimeout
 	}
-	return &Error{Provider: p.opts.Name, Kind: kind, Message: err.Error()}
+	return &Error{Provider: p.opts.Name, Kind: kind, Message: redact(p.opts.APIKey, err.Error())}
 }
 
 // statusError maps a non-2xx upstream response onto a classified error.
@@ -190,7 +191,7 @@ func (p *httpProvider) statusError(resp *http.Response) error {
 	e := &Error{
 		Provider: p.opts.Name,
 		Status:   resp.StatusCode,
-		Message:  upstreamMessage(raw),
+		Message:  redact(p.opts.APIKey, upstreamMessage(raw)),
 	}
 	switch {
 	case resp.StatusCode == http.StatusRequestTimeout, resp.StatusCode == http.StatusGatewayTimeout:

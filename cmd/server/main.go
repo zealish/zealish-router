@@ -110,13 +110,13 @@ func keysCommand(cfg *config.Config, args []string) error {
 			return err
 		}
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(w, "ID\tNAME\tENABLED\tCREATED\tLAST USED")
+		_, _ = fmt.Fprintln(w, "ID\tNAME\tENABLED\tCREATED\tLAST USED")
 		for _, k := range records {
 			lastUsed := "never"
 			if !k.LastUsedAt.IsZero() {
 				lastUsed = k.LastUsedAt.Format(time.RFC3339)
 			}
-			fmt.Fprintf(w, "%s\t%s\t%t\t%s\t%s\n",
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%t\t%s\t%s\n",
 				k.ID, k.Name, k.Enabled, k.CreatedAt.Format(time.RFC3339), lastUsed)
 		}
 		return w.Flush()
@@ -151,13 +151,13 @@ func modelsCommand(cfg *config.Config) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "ALIAS\tPROVIDER\tMODEL\tFALLBACK")
+	_, _ = fmt.Fprintln(w, "ALIAS\tPROVIDER\tMODEL\tFALLBACK")
 	for _, m := range aliases {
 		fallback := "-"
 		if len(m.Fallback) > 0 {
 			fallback = strings.Join(m.Fallback, " → ")
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", m.Alias, m.Provider, m.Model, fallback)
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", m.Alias, m.Provider, m.Model, fallback)
 	}
 	return w.Flush()
 }

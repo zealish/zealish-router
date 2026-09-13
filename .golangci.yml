@@ -1,0 +1,29 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - bodyclose
+    - errcheck
+    - errorlint
+    - govet
+    - ineffassign
+    - misspell
+    - noctx
+    - revive
+    - staticcheck
+    - unconvert
+    - unused
+
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - bodyclose
+          - noctx
+
+formatters:
+  enable:
+    - gofmt

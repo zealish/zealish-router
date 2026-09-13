@@ -404,7 +404,7 @@ func (h *adminHandler) putSettings(w http.ResponseWriter, r *http.Request) {
 
 func decodeBody(w http.ResponseWriter, r *http.Request, dst any) bool {
 	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request_error", "Request body is not valid JSON.")
+		writeDecodeError(w, err, "Request body is not valid JSON.")
 		return false
 	}
 	return true

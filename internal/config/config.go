@@ -30,6 +30,8 @@ type Server struct {
 	ReadTimeout     time.Duration `yaml:"read_timeout"`
 	WriteTimeout    time.Duration `yaml:"write_timeout"`
 	ShutdownTimeout time.Duration `yaml:"shutdown_timeout"`
+	// MaxBodyBytes caps the size of a request body. 0 disables the limit.
+	MaxBodyBytes int64 `yaml:"max_body_bytes"`
 }
 
 // Address returns the host:port listen address.
@@ -64,6 +66,7 @@ func Default() *Config {
 			ReadTimeout:     30 * time.Second,
 			WriteTimeout:    0,
 			ShutdownTimeout: 15 * time.Second,
+			MaxBodyBytes:    4 << 20,
 		},
 		Database: Database{Path: "data/router.db"},
 		Auth:     Auth{Enabled: true},
@@ -92,6 +95,9 @@ func Load(path string) (*Config, error) {
 func (c *Config) Validate() error {
 	if c.Server.Port <= 0 || c.Server.Port > 65535 {
 		return fmt.Errorf("config: invalid server.port %d", c.Server.Port)
+	}
+	if c.Server.MaxBodyBytes < 0 {
+		return fmt.Errorf("config: invalid server.max_body_bytes %d", c.Server.MaxBodyBytes)
 	}
 	if c.Database.Path == "" {
 		return errors.New("config: database.path is required")

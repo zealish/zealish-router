@@ -128,8 +128,7 @@ func TestStreamEstimatesUsageWhenOmitted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ChatCompletionStream: %v", err)
 	}
-	for range ch {
-	}
+	drain(ch)
 
 	if got := rec.token("openai/gpt-5-upstream/prompt"); got != 2 {
 		t.Errorf("estimated prompt tokens = %d, want 2", got)
@@ -149,7 +148,12 @@ func TestNilRecorderIsSafe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ChatCompletionStream: %v", err)
 	}
-	for range ch {
+	drain(ch)
+}
+
+// drain consumes a stream to completion, so the metering goroutine finishes.
+func drain(ch <-chan openai.StreamChunk) {
+	for range ch { //nolint:revive // draining is the point
 	}
 }
 

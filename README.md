@@ -114,6 +114,7 @@ server:
   read_timeout: 30s
   write_timeout: 0s        # 0 = no write deadline, required for streaming
   shutdown_timeout: 15s
+  max_body_bytes: 4194304  # 4 MiB cap on request bodies; 0 disables it
 
 database:
   path: data/router.db
@@ -133,6 +134,7 @@ admin:
 | Key | Meaning |
 |---|---|
 | `server.write_timeout` | Keep at `0s`; a non-zero deadline truncates long streams. |
+| `server.max_body_bytes` | Request bodies above this size are rejected with 413. `0` disables the cap. |
 | `database.path` | SQLite file; parent directories are created on demand. |
 | `auth.enabled` | `false` disables gateway authentication entirely. |
 | `auth.api_keys` | Static keys compared in constant time; useful for local dev. |
@@ -232,6 +234,8 @@ The image is multi-stage and runs as nonroot on distroless.
 make build    # static binary into bin/
 make run      # go run with config.yaml
 make test     # go test ./...
+make race     # go test -race ./...
+make lint     # golangci-lint run ./...
 make vet      # go vet ./...
 make fmt      # gofmt -l -w .
 ```

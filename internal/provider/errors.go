@@ -3,6 +3,7 @@ package provider
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // Retryable upstream failure classes. The routing engine advances its fallback
@@ -50,4 +51,17 @@ func Retryable(err error) bool {
 		errors.Is(err, ErrRateLimited) ||
 		errors.Is(err, ErrUpstream5xx) ||
 		errors.Is(err, ErrConnection)
+}
+
+// redactionPlaceholder replaces a secret in text bound for logs or clients.
+const redactionPlaceholder = "[REDACTED]"
+
+// redact removes secret from msg. Upstreams routinely echo the credential back
+// in their error payloads ("Incorrect API key provided: sk-…"), which would
+// otherwise reach both the log and the caller.
+func redact(secret, msg string) string {
+	if secret == "" {
+		return msg
+	}
+	return strings.ReplaceAll(msg, secret, redactionPlaceholder)
 }

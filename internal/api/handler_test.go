@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -10,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-chi/chi/v5"
 
 	"github.com/zealish/zealish-router/internal/auth"
 	"github.com/zealish/zealish-router/internal/config"
@@ -64,11 +67,20 @@ func (s *stubProvider) ChatCompletionStream(_ context.Context, _ *openai.ChatCom
 
 // newTestServer wires a full routing table around p, with auth disabled.
 func newTestServer(t *testing.T, p provider.Provider) http.Handler {
+	return newTestServerWithConfig(t, p, nil)
+}
+
+// newTestServerWithConfig wires the same routing table, letting a test tweak
+// the configuration before the routes are built.
+func newTestServerWithConfig(t *testing.T, p provider.Provider, tweak func(*config.Config)) http.Handler {
 	t.Helper()
 
 	cfg := config.Default()
 	cfg.Auth.Enabled = false
 	cfg.Admin.Enabled = false
+	if tweak != nil {
+		tweak(cfg)
+	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	collector := metrics.New()
@@ -272,5 +284,55 @@ func TestStreamingClientDisconnect(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), "[DONE]") {
 		t.Error("disconnected client must not be sent the sentinel")
+	}
+}
+
+func TestChatCompletionsBodyTooLarge(t *testing.T) {
+	h := newTestServerWithConfig(t, &stubProvider{name: "openai"}, func(c *config.Config) {
+		c.Server.MaxBodyBytes = 256
+	})
+
+	body := `{"model":"gpt-5","messages":[{"role":"user","content":"` + strings.Repeat("a", 1024) + `"}]}`
+	rec := post(t, h, body)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413", rec.Code)
+	}
+	if got := decodeError(t, rec).Error.Type; got != "invalid_request_error" {
+		t.Errorf("error type = %q", got)
+	}
+}
+
+func TestChatCompletionsBodyLimitDisabled(t *testing.T) {
+	h := newTestServerWithConfig(t, &stubProvider{name: "openai"}, func(c *config.Config) {
+		c.Server.MaxBodyBytes = 0
+	})
+
+	body := `{"model":"gpt-5","messages":[{"role":"user","content":"` + strings.Repeat("a", 1<<16) + `"}]}`
+	if rec := post(t, h, body); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+}
+
+func TestRecovererReturnsGenericError(t *testing.T) {
+	logs := &bytes.Buffer{}
+	logger := slog.New(slog.NewTextHandler(logs, nil))
+
+	r := chi.NewRouter()
+	r.Use(recoverer(logger))
+	r.Get("/boom", func(http.ResponseWriter, *http.Request) {
+		panic("database password hunter2")
+	})
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/boom", nil))
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+	if body := rec.Body.String(); strings.Contains(body, "hunter2") || strings.Contains(body, "handler_test.go") {
+		t.Errorf("panic detail leaked to client: %q", body)
+	}
+	if !strings.Contains(logs.String(), "hunter2") {
+		t.Error("panic value was not logged")
 	}
 }
