@@ -24,7 +24,7 @@ FROM gcr.io/distroless/static-debian12:nonroot
 WORKDIR /app
 COPY --from=build /out/zealish-router /app/zealish-router
 COPY --from=build --chown=nonroot:nonroot /out/data /app/data
-COPY config.yaml /app/config.yaml
+COPY config.example.yaml /app/config.yaml
 
 EXPOSE 8787
 USER nonroot:nonroot

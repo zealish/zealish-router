@@ -29,7 +29,7 @@ archives:
     files:
       - README.md
       - LICENSE
-      - config.yaml
+      - config.example.yaml
       - packaging/systemd/zealish-router.service
 
 checksum:
