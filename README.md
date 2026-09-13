@@ -154,6 +154,7 @@ keys create --name <name>    create a gateway key, print it once
 keys list                    list keys with creation and last-used times
 keys revoke <id>             delete a key
 models                       print the alias → provider/model/fallback table
+version                      print the build version
 ```
 
 ---
@@ -214,17 +215,56 @@ Token counts come from upstream `usage` when reported and are estimated
 
 ---
 
-## Docker
+## Deployment
+
+### Docker Compose
+
+```sh
+docker compose -f docker/compose.yaml up -d
+```
+
+`config.yaml` is bind-mounted read-only and the database lives in the named
+`router-data` volume.
+
+### Docker
 
 ```sh
 make docker
 docker run -p 8787:8787 \
   -v "$PWD/config.yaml:/app/config.yaml:ro" \
-  -v "$PWD/data:/app/data" \
+  -v router-data:/app/data \
   zealish-router:0.1.0
 ```
 
-The image is multi-stage and runs as nonroot on distroless.
+The image is multi-stage and runs as nonroot on distroless. Multi-arch images
+(`linux/amd64`, `linux/arm64`) are cross-compiled from the build platform:
+
+```sh
+make docker-multiarch          # needs a buildx builder
+```
+
+### systemd
+
+```sh
+sudo install -m 0755 bin/zealish-router /usr/local/bin/zealish-router
+sudo install -Dm 0644 config.yaml /etc/zealish-router/config.yaml
+sudo install -Dm 0644 packaging/systemd/zealish-router.service \
+  /etc/systemd/system/zealish-router.service
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now zealish-router
+```
+
+The unit runs under `DynamicUser` with a hardened sandbox and gets
+`/var/lib/zealish-router` from `StateDirectory` — set `database.path` to
+`/var/lib/zealish-router/router.db`.
+
+### Binaries
+
+```sh
+make release                   # static linux amd64 + arm64 into bin/
+make snapshot                  # goreleaser tarballs without tagging
+```
 
 ---
 
@@ -255,7 +295,8 @@ internal/metrics  private Prometheus registry
 pkg/openai        OpenAI wire types
 ```
 
-See `PRD.md` for the product spec and `TODO.md` for the milestone checklist.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution workflow, `PRD.md`
+for the product spec and `TODO.md` for the milestone checklist.
 
 ---
 

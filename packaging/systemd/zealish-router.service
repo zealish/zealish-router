@@ -1,0 +1,48 @@
+[Unit]
+Description=Zealish Router — OpenAI-compatible AI gateway
+Documentation=https://github.com/zealish/zealish-router
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/zealish-router -config /etc/zealish-router/config.yaml serve
+# SIGTERM triggers the graceful shutdown path; give in-flight streams room to
+# drain before the process is killed.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=5s
+
+DynamicUser=yes
+# StateDirectory creates and owns /var/lib/zealish-router; point
+# database.path at it in config.yaml.
+StateDirectory=zealish-router
+WorkingDirectory=/var/lib/zealish-router
+ConfigurationDirectory=zealish-router
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

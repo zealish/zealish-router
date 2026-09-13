@@ -23,6 +23,9 @@ import (
 	"github.com/zealish/zealish-router/internal/storage"
 )
 
+// version is overridden at build time with -X main.version=<tag>.
+var version = "dev"
+
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintf(os.Stderr, "zealish-router: %v\n", err)
@@ -38,16 +41,23 @@ func run(args []string) error {
 		return err
 	}
 
-	cfg, err := config.Load(*configPath)
-	if err != nil {
-		return err
-	}
-
 	rest := fs.Args()
 	command := "serve"
 	if len(rest) > 0 {
 		command = rest[0]
 		rest = rest[1:]
+	}
+
+	// version answers before the configuration is touched, so it works on a
+	// machine that has no config file yet.
+	if command == "version" {
+		fmt.Println(version)
+		return nil
+	}
+
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		return err
 	}
 
 	logger := newLogger(*logLevel)

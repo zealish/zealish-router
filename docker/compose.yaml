@@ -1,0 +1,18 @@
+services:
+  router:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: zealish-router:latest
+    container_name: zealish-router
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    volumes:
+      # Process-level configuration; providers and model aliases live in the
+      # database and are managed through /api/v1.
+      - ../config.yaml:/app/config.yaml:ro
+      - router-data:/app/data
+
+volumes:
+  router-data:

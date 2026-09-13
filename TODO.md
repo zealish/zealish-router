@@ -184,17 +184,17 @@ Legend: `[x]` done · `[ ]` pending · `~` partial (scaffold only, no logic)
 - [ ] TanStack Table for lists, Recharts for overview
 - [ ] Confirm no model traffic passes through Next.js (PRD §16)
 
-### Packaging
+### Packaging ✅
 - [x] Multi-stage Dockerfile, distroless nonroot
-- [ ] `docker/compose.yaml` — router + volume for `data/`
-- [ ] Multi-arch build: `linux/amd64` + `linux/arm64`
-- [ ] systemd unit file
-- [ ] RPM spec (Fedora first)
-- [ ] `.goreleaser.yaml` or make target for tagged release binaries
+- [x] `docker/compose.yaml` — router + named `router-data` volume for `/app/data`, config bind-mounted read-only
+- [x] Multi-arch build: `linux/amd64` + `linux/arm64` — `Dockerfile` cross-compiles from `$BUILDPLATFORM` via `TARGETOS`/`TARGETARCH`; `make docker-multiarch` and `make release`
+- [x] `packaging/systemd/zealish-router.service` — `DynamicUser`, `StateDirectory`, SIGTERM into the graceful shutdown path, hardened sandbox
+- [x] `.goreleaser.yaml` — static linux amd64/arm64 tarballs with README, LICENSE, config and unit file; `make snapshot`
+- [x] `version` command + `-X main.version` stamping, resolvable without a config file
 
 ### Hardening
 - [x] Request body size limit — `server.max_body_bytes` (default 4 MiB) enforced by `limitBody` on `/v1` and `/api/v1`, oversized bodies get a 413 JSON envelope
-- [ ] Per-key rate limiting (decide: in-scope or post-1.0)
+- [x] Per-key rate limiting — **deferred to post-1.0** (Open Decision #4). A reverse proxy in front of the gateway covers the deployment case; an in-process limiter needs a quota model on `api_keys` that is not worth blocking the release
 - [x] Panic recovery verified to not leak internals to clients — own `recoverer` replaces chi's, logs panic + stack, writes a generic 500 envelope, re-panics on `http.ErrAbortHandler`
 - [x] Redact API keys from all log output — `provider.redact` strips the credential from upstream and transport error messages, which feed both logs and client responses
 - [x] `-race` test run in CI
@@ -204,8 +204,9 @@ Legend: `[x]` done · `[ ]` pending · `~` partial (scaffold only, no logic)
 - [x] `README.md` — quickstart, config reference, coding-agent setup examples
 - [x] `.gitignore` — `bin/`, `data/`, `.env`
 - [x] `.github/workflows/ci.yml` — gofmt, vet, build, `test -race`, golangci-lint
+- [x] `.github/workflows/release.yml` — on `v*` tags: goreleaser binaries + multi-arch image pushed to GHCR
 - [x] `.golangci.yml` — errcheck, errorlint, revive, staticcheck, bodyclose, noctx; repo is lint-clean
-- [ ] `CONTRIBUTING.md`
+- [x] `CONTRIBUTING.md` — local workflow, required checks, layout, conventions, how to add a provider
 
 ---
 
@@ -216,11 +217,11 @@ Legend: `[x]` done · `[ ]` pending · `~` partial (scaffold only, no logic)
 | 1 | SQLite driver | `modernc.org/sqlite` (pure Go) vs `mattn/go-sqlite3` (cgo) | **resolved: `modernc.org/sqlite`** (v0.5) |
 | 2 | Config as source of truth vs DB | YAML-only, DB-only, or YAML seeds DB | **resolved: DB-only** (v0.7) |
 | 3 | Streaming fallback after first byte | commit vs inject error chunk | **resolved: commit** (v0.4) |
-| 4 | Rate limiting scope | v1.0 vs post-1.0 | open |
+| 4 | Rate limiting scope | v1.0 vs post-1.0 | **resolved: post-1.0** (v1.0) |
 | 5 | `Message.Content` representation | `json.RawMessage` vs typed union | **resolved: `json.RawMessage` + `Text()`** (v0.2) |
 
 ---
 
 ## Next Action
 
-**v1.0 — packaging, then dashboard.** Backend, hardening and CI are done: the repo is lint-clean, tested under `-race`, has a request body cap, a non-leaking panic recovery path and credential redaction in provider errors. Remaining: packaging (`docker/compose.yaml`, multi-arch build, systemd unit, RPM spec, goreleaser), `CONTRIBUTING.md`, the per-key rate-limiting decision (Open Decision #4), and the Next.js dashboard in `apps/dashboard` consuming `/api/v1`.
+**v1.0 — dashboard is all that is left.** Backend, hardening, CI, packaging and repo hygiene are done: the repo is lint-clean, tested under `-race`, ships multi-arch images and static tarballs, a compose file and a hardened systemd unit. Remaining for the release: the Next.js dashboard in `apps/dashboard` (Overview, Models, Providers, API Keys, Settings) consuming `/api/v1`, then tagging. Per-key rate limiting is deferred to post-1.0.

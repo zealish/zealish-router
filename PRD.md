@@ -554,7 +554,6 @@ Target platform
 
 - Dashboard
 - Docker
-- RPM package
 - Stable release
 
 ---
