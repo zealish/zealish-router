@@ -200,8 +200,8 @@ Legend: `[x]` done · `[ ]` pending · `~` partial (scaffold only, no logic)
 - [ ] `-race` test run in CI
 
 ### Repo hygiene
-- [ ] `LICENSE` — Apache-2.0 (PRD header)
-- [ ] `README.md` — quickstart, config reference, coding-agent setup examples
+- [x] `LICENSE` — Apache-2.0 (PRD header)
+- [x] `README.md` — quickstart, config reference, coding-agent setup examples
 - [x] `.gitignore` — `bin/`, `data/`, `.env`
 - [ ] `.github/workflows/ci.yml` — build, vet, test, gofmt check
 - [ ] `.golangci.yml`
@@ -223,4 +223,4 @@ Legend: `[x]` done · `[ ]` pending · `~` partial (scaffold only, no logic)
 
 ## Next Action
 
-**v1.0 — dashboard, packaging, hardening.** The backend is complete: the gateway (`/v1`) and the admin API (`/api/v1`) are both done and tested, with the database as the single source of truth for routing. Next is the Next.js dashboard in `apps/dashboard` consuming `/api/v1`, then packaging (compose, multi-arch, systemd, RPM) and the hardening list. A `README.md` is now overdue: `config.yaml` no longer carries providers or models, so first-run setup goes through `/api/v1` or the CLI and needs documenting.
+**v1.0 — hardening, packaging, dashboard.** The backend is complete and the repo is now under version control with `README.md` and `LICENSE` in place. Remaining, in order: backend hardening (request body size limit, API-key redaction in logs, panic-recovery leak check), CI (`build`/`vet`/`test -race`/gofmt) plus `.golangci.yml`, packaging (compose, multi-arch, systemd, RPM, goreleaser), then the Next.js dashboard in `apps/dashboard` consuming `/api/v1`.
