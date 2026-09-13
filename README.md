@@ -42,9 +42,11 @@ cd zealish-router
 make build
 ```
 
-Validate the shipped config, then start the server:
+Copy the template, validate it, then start the server. `config.yaml` is
+gitignored so your admin token never lands in version control:
 
 ```sh
+cp config.example.yaml config.yaml
 ./bin/zealish-router -config config.yaml validate
 ./bin/zealish-router -config config.yaml serve
 ```
