@@ -25,14 +25,14 @@ func newAnthropicProvider(t *testing.T, opts Options, h http.HandlerFunc) *Anthr
 }
 
 func anthropicRequestFixture() *openai.ChatCompletionRequest {
-	max := 256
+	maxTokens := 256
 	return &openai.ChatCompletionRequest{
 		Model: "claude-sonnet-4",
 		Messages: []openai.Message{
 			{Role: "system", Content: json.RawMessage(`"be brief"`)},
 			{Role: "user", Content: json.RawMessage(`"hi"`)},
 		},
-		MaxTokens: &max,
+		MaxTokens: &maxTokens,
 	}
 }
 

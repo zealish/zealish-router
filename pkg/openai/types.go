@@ -20,6 +20,7 @@ type Message struct {
 	Extra map[string]json.RawMessage `json:"-"`
 }
 
+// UnmarshalJSON decodes a message, capturing unmodelled fields into Extra.
 func (m *Message) UnmarshalJSON(data []byte) error {
 	type alias Message
 	ex, err := decodeExtras[Message](data, (*alias)(m))
@@ -30,6 +31,7 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// MarshalJSON encodes the message, folding Extra back into the object.
 func (m Message) MarshalJSON() ([]byte, error) {
 	type alias Message
 	return encodeExtras(alias(m), m.Extra)
@@ -72,6 +74,7 @@ type ChatCompletionRequest struct {
 	Extra map[string]json.RawMessage `json:"-"`
 }
 
+// UnmarshalJSON decodes a request, capturing unmodelled fields into Extra.
 func (r *ChatCompletionRequest) UnmarshalJSON(data []byte) error {
 	type alias ChatCompletionRequest
 	ex, err := decodeExtras[ChatCompletionRequest](data, (*alias)(r))
@@ -82,6 +85,7 @@ func (r *ChatCompletionRequest) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// MarshalJSON encodes the request, folding Extra back into the object.
 func (r ChatCompletionRequest) MarshalJSON() ([]byte, error) {
 	type alias ChatCompletionRequest
 	return encodeExtras(alias(r), r.Extra)
@@ -98,6 +102,7 @@ type Choice struct {
 	Extra map[string]json.RawMessage `json:"-"`
 }
 
+// UnmarshalJSON decodes a choice, capturing unmodelled fields into Extra.
 func (c *Choice) UnmarshalJSON(data []byte) error {
 	type alias Choice
 	ex, err := decodeExtras[Choice](data, (*alias)(c))
@@ -108,6 +113,7 @@ func (c *Choice) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// MarshalJSON encodes the choice, folding Extra back into the object.
 func (c Choice) MarshalJSON() ([]byte, error) {
 	type alias Choice
 	return encodeExtras(alias(c), c.Extra)
@@ -173,6 +179,7 @@ type ChatCompletionResponse struct {
 	Extra map[string]json.RawMessage `json:"-"`
 }
 
+// UnmarshalJSON decodes a response, capturing unmodelled fields into Extra.
 func (r *ChatCompletionResponse) UnmarshalJSON(data []byte) error {
 	type alias ChatCompletionResponse
 	ex, err := decodeExtras[ChatCompletionResponse](data, (*alias)(r))
@@ -183,6 +190,7 @@ func (r *ChatCompletionResponse) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// MarshalJSON encodes the response, folding Extra back into the object.
 func (r ChatCompletionResponse) MarshalJSON() ([]byte, error) {
 	type alias ChatCompletionResponse
 	return encodeExtras(alias(r), r.Extra)
@@ -201,6 +209,7 @@ type StreamChunk struct {
 	Extra map[string]json.RawMessage `json:"-"`
 }
 
+// UnmarshalJSON decodes a chunk, capturing unmodelled fields into Extra.
 func (c *StreamChunk) UnmarshalJSON(data []byte) error {
 	type alias StreamChunk
 	ex, err := decodeExtras[StreamChunk](data, (*alias)(c))
@@ -211,6 +220,7 @@ func (c *StreamChunk) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// MarshalJSON encodes the chunk, folding Extra back into the object.
 func (c StreamChunk) MarshalJSON() ([]byte, error) {
 	type alias StreamChunk
 	return encodeExtras(alias(c), c.Extra)

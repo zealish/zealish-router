@@ -230,40 +230,40 @@ func toAPIKeyResponse(k storage.APIKey) apiKeyResponse {
 // --- providers ---
 
 type providerResponse struct {
-	Name        string `json:"name"`
-	Group       string `json:"group"`
-	CatalogID   string `json:"catalog_id,omitempty"`
-	Kind        string `json:"kind"`
-	BaseURL     string `json:"base_url"`
-	HasAPIKey   bool   `json:"has_api_key"`
-	TimeoutMS   int64  `json:"timeout_ms"`
-	Enabled     bool   `json:"enabled"`
+	Name         string `json:"name"`
+	Group        string `json:"group"`
+	CatalogID    string `json:"catalog_id,omitempty"`
+	Kind         string `json:"kind"`
+	BaseURL      string `json:"base_url"`
+	HasAPIKey    bool   `json:"has_api_key"`
+	TimeoutMS    int64  `json:"timeout_ms"`
+	Enabled      bool   `json:"enabled"`
 	AliasPrefix  string `json:"alias_prefix"`
 	UseProxyPool bool   `json:"use_proxy_pool"`
 }
 
 type providerRequest struct {
-	Group       string `json:"group"`
-	CatalogID   string `json:"catalog_id"`
-	Kind        string `json:"kind"`
-	BaseURL     string `json:"base_url"`
-	APIKey      string `json:"api_key"`
-	TimeoutMS   int64  `json:"timeout_ms"`
-	Enabled     bool   `json:"enabled"`
+	Group        string `json:"group"`
+	CatalogID    string `json:"catalog_id"`
+	Kind         string `json:"kind"`
+	BaseURL      string `json:"base_url"`
+	APIKey       string `json:"api_key"`
+	TimeoutMS    int64  `json:"timeout_ms"`
+	Enabled      bool   `json:"enabled"`
 	AliasPrefix  string `json:"alias_prefix"`
 	UseProxyPool bool   `json:"use_proxy_pool"`
 }
 
 func toProviderResponse(p storage.Provider) providerResponse {
 	return providerResponse{
-		Name:        p.Name,
-		Group:       p.Group,
-		CatalogID:   p.CatalogID,
-		Kind:        p.Kind,
-		BaseURL:     p.BaseURL,
-		HasAPIKey:   p.APIKey != "",
-		TimeoutMS:   p.Timeout.Milliseconds(),
-		Enabled:     p.Enabled,
+		Name:         p.Name,
+		Group:        p.Group,
+		CatalogID:    p.CatalogID,
+		Kind:         p.Kind,
+		BaseURL:      p.BaseURL,
+		HasAPIKey:    p.APIKey != "",
+		TimeoutMS:    p.Timeout.Milliseconds(),
+		Enabled:      p.Enabled,
 		AliasPrefix:  p.AliasPrefix,
 		UseProxyPool: p.UseProxyPool,
 	}
@@ -313,15 +313,15 @@ func (h *adminHandler) putProvider(w http.ResponseWriter, r *http.Request) {
 	}
 
 	record := storage.Provider{
-		ID:          name,
-		Name:        name,
-		Group:       group,
-		CatalogID:   strings.TrimSpace(req.CatalogID),
-		Kind:        req.Kind,
-		BaseURL:     req.BaseURL,
-		APIKey:      req.APIKey,
-		Timeout:     time.Duration(req.TimeoutMS) * time.Millisecond,
-		Enabled:     req.Enabled,
+		ID:           name,
+		Name:         name,
+		Group:        group,
+		CatalogID:    strings.TrimSpace(req.CatalogID),
+		Kind:         req.Kind,
+		BaseURL:      req.BaseURL,
+		APIKey:       req.APIKey,
+		Timeout:      time.Duration(req.TimeoutMS) * time.Millisecond,
+		Enabled:      req.Enabled,
 		AliasPrefix:  strings.TrimSpace(req.AliasPrefix),
 		UseProxyPool: req.UseProxyPool,
 	}

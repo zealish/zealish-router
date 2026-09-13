@@ -40,9 +40,36 @@ export function ImportModelsDialog({
   onOpenChange: (open: boolean) => void;
   onImported: () => Promise<void> | void;
 }) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      {open ? (
+        <ImportModelsBody
+          provider={provider}
+          aliasPrefix={aliasPrefix}
+          onOpenChange={onOpenChange}
+          onImported={onImported}
+        />
+      ) : null}
+    </Dialog>
+  );
+}
+
+// Mounted only while the dialog is open, so state starts fresh on every open —
+// no imperative resets needed inside the fetch effect.
+function ImportModelsBody({
+  provider,
+  aliasPrefix,
+  onOpenChange,
+  onImported,
+}: {
+  provider: string;
+  aliasPrefix: string;
+  onOpenChange: (open: boolean) => void;
+  onImported: () => Promise<void> | void;
+}) {
   const [catalog, setCatalog] = useState<CatalogModel[]>();
   const [error, setError] = useState<string>();
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [importing, setImporting] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState("");
@@ -50,14 +77,7 @@ export function ImportModelsDialog({
   const [overwrite, setOverwrite] = useState(false);
 
   useEffect(() => {
-    if (!open) return;
-
     let cancelled = false;
-    setLoading(true);
-    setError(undefined);
-    setCatalog(undefined);
-    setSelected(new Set());
-    setPrefix(aliasPrefix);
 
     api
       .get<CatalogModel[]>(`/providers/${encodeURIComponent(provider)}/catalog`)
@@ -75,7 +95,7 @@ export function ImportModelsDialog({
     return () => {
       cancelled = true;
     };
-  }, [open, provider, aliasPrefix]);
+  }, [provider]);
 
   const needle = filter.trim().toLowerCase();
   const visible = (catalog ?? []).filter((m) =>
@@ -122,8 +142,7 @@ export function ImportModelsDialog({
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-2xl">
+    <DialogContent className="sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>Import models</DialogTitle>
           <DialogDescription>
@@ -244,7 +263,6 @@ export function ImportModelsDialog({
             </Button>
           </div>
         </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    </DialogContent>
   );
 }
