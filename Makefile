@@ -9,7 +9,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 PLATFORMS := linux/amd64,linux/arm64
 comma     := ,
 
-.PHONY: all build release run test race lint vet fmt tidy clean docker docker-multiarch snapshot
+.PHONY: all build release run dev test race lint vet fmt tidy clean docker docker-multiarch snapshot
 
 all: build
 
@@ -30,6 +30,13 @@ release:
 
 run:
 	go run ./cmd/server -config config.yaml serve
+
+# dev runs the router and the dashboard together; Ctrl-C stops both.
+dev:
+	@go run ./cmd/server -config config.yaml serve & router=$$!; \
+	npm --prefix apps/dashboard run dev & dash=$$!; \
+	trap 'kill $$router $$dash 2>/dev/null' INT TERM; \
+	wait $$router $$dash
 
 test:
 	go test $(PKG)

@@ -29,7 +29,7 @@ func TestReloadSwapsRoutingTable(t *testing.T) {
 		t.Fatalf("provider = %q, want openai", route.Provider)
 	}
 
-	e.Reload(reloadAliases("gpt-5", "ollama", "qwen3:32b"), provider.NewRegistry(after))
+	e.Reload(reloadAliases("gpt-5", "ollama", "qwen3:32b"), nil, provider.NewRegistry(after))
 
 	route, err = e.Resolve("gpt-5")
 	if err != nil {
@@ -43,7 +43,7 @@ func TestReloadSwapsRoutingTable(t *testing.T) {
 func TestReloadRemovesStaleAliases(t *testing.T) {
 	e := newTestEngine(t, nil, &usageProvider{name: "openai"})
 
-	e.Reload(reloadAliases("only", "openai", "m"), provider.NewRegistry(&usageProvider{name: "openai"}))
+	e.Reload(reloadAliases("only", "openai", "m"), nil, provider.NewRegistry(&usageProvider{name: "openai"}))
 
 	if got := e.Aliases(); len(got) != 1 || got[0] != "only" {
 		t.Errorf("aliases = %v, want [only]", got)
@@ -87,7 +87,7 @@ func TestReloadDuringConcurrentDispatch(t *testing.T) {
 		if i%2 == 1 {
 			model = "b"
 		}
-		e.Reload(reloadAliases("gpt-5", "openai", model), provider.NewRegistry(p))
+		e.Reload(reloadAliases("gpt-5", "openai", model), nil, provider.NewRegistry(p))
 	}
 
 	cancel()
@@ -102,7 +102,7 @@ func TestNewEngineIsUsableBeforeAnyReload(t *testing.T) {
 		t.Fatal("empty engine resolved an alias")
 	}
 
-	e.Reload(reloadAliases("gpt-5", "openai", "m"), provider.NewRegistry(&usageProvider{name: "openai"}))
+	e.Reload(reloadAliases("gpt-5", "openai", "m"), nil, provider.NewRegistry(&usageProvider{name: "openai"}))
 	if _, err := e.Resolve("gpt-5"); err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}

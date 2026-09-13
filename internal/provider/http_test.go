@@ -27,69 +27,47 @@ func newTestProvider(t *testing.T, name string, h http.HandlerFunc) (Provider, *
 	t.Cleanup(srv.Close)
 
 	opts := Options{Name: name, BaseURL: srv.URL, APIKey: "sk-test", HTTPClient: srv.Client()}
-	switch name {
-	case "openrouter":
-		return NewOpenRouter(opts), srv
-	case "ollama":
-		return NewOllama(opts), srv
-	default:
-		return NewOpenAI(opts), srv
-	}
+	return NewOpenAI(opts), srv
 }
 
 func TestChatCompletionHappyPath(t *testing.T) {
-	for _, name := range []string{"openai", "openrouter", "ollama"} {
-		t.Run(name, func(t *testing.T) {
-			var gotPath string
-			var gotHeaders http.Header
-			var gotBody openai.ChatCompletionRequest
+	var gotPath string
+	var gotHeaders http.Header
+	var gotBody openai.ChatCompletionRequest
 
-			p, _ := newTestProvider(t, name, func(w http.ResponseWriter, r *http.Request) {
-				gotPath = r.URL.Path
-				gotHeaders = r.Header.Clone()
-				if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
-					t.Errorf("decode upstream body: %v", err)
-				}
-				writeJSON(t, w, openai.ChatCompletionResponse{
-					ID:      "cmpl-1",
-					Object:  "chat.completion",
-					Model:   "gpt-5",
-					Choices: []openai.Choice{{Index: 0, Message: &openai.Message{Role: "assistant", Content: json.RawMessage(`"pong"`)}}},
-					Usage:   &openai.Usage{PromptTokens: 3, CompletionTokens: 1, TotalTokens: 4},
-				})
-			})
-
-			resp, err := p.ChatCompletion(context.Background(), testRequest())
-			if err != nil {
-				t.Fatalf("ChatCompletion: %v", err)
-			}
-			if resp.ID != "cmpl-1" || len(resp.Choices) != 1 {
-				t.Fatalf("unexpected response: %+v", resp)
-			}
-			if resp.Usage == nil || resp.Usage.TotalTokens != 4 {
-				t.Fatalf("usage not decoded: %+v", resp.Usage)
-			}
-			if gotPath != "/chat/completions" {
-				t.Errorf("path = %q, want /chat/completions", gotPath)
-			}
-			if gotBody.Stream {
-				t.Error("stream must be false on non-streaming calls")
-			}
-
-			auth := gotHeaders.Get("Authorization")
-			if name == "ollama" {
-				if auth != "" {
-					t.Errorf("ollama must not send Authorization, got %q", auth)
-				}
-			} else if auth != "Bearer sk-test" {
-				t.Errorf("Authorization = %q", auth)
-			}
-			if name == "openrouter" {
-				if gotHeaders.Get("HTTP-Referer") == "" || gotHeaders.Get("X-Title") == "" {
-					t.Error("openrouter attribution headers missing")
-				}
-			}
+	p, _ := newTestProvider(t, "openai", func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotHeaders = r.Header.Clone()
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Errorf("decode upstream body: %v", err)
+		}
+		writeJSON(t, w, openai.ChatCompletionResponse{
+			ID:      "cmpl-1",
+			Object:  "chat.completion",
+			Model:   "gpt-5",
+			Choices: []openai.Choice{{Index: 0, Message: &openai.Message{Role: "assistant", Content: json.RawMessage(`"pong"`)}}},
+			Usage:   &openai.Usage{PromptTokens: 3, CompletionTokens: 1, TotalTokens: 4},
 		})
+	})
+
+	resp, err := p.ChatCompletion(context.Background(), testRequest())
+	if err != nil {
+		t.Fatalf("ChatCompletion: %v", err)
+	}
+	if resp.ID != "cmpl-1" || len(resp.Choices) != 1 {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+	if resp.Usage == nil || resp.Usage.TotalTokens != 4 {
+		t.Fatalf("usage not decoded: %+v", resp.Usage)
+	}
+	if gotPath != "/chat/completions" {
+		t.Errorf("path = %q, want /chat/completions", gotPath)
+	}
+	if gotBody.Stream {
+		t.Error("stream must be false on non-streaming calls")
+	}
+	if auth := gotHeaders.Get("Authorization"); auth != "Bearer sk-test" {
+		t.Errorf("Authorization = %q", auth)
 	}
 }
 

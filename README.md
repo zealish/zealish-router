@@ -15,10 +15,17 @@ License: Apache-2.0 · Platform: Linux, Docker
 ## Features
 
 - OpenAI-compatible `POST /v1/chat/completions` and `GET /v1/models`
-- Providers: OpenAI, OpenRouter, Ollama
+- Two wire dialects — OpenAI and Anthropic — plus a preset catalogue for known
+  upstreams (OpenAI, OpenRouter, Groq, Ollama, …); any compatible endpoint works
 - Model aliases with a deterministic fallback chain
+- Combos: one virtual model name backed by a pool of aliases, `fallback` or
+  `round_robin`
 - Bounded retry with exponential backoff, then fallback to the next provider
 - Server-sent-events streaming with heartbeats and client-disconnect handling
+- Durable usage log: every request — successful or failed — is recorded with
+  tokens, cost and status for lifetime statistics
+- Built-in pricing table for cost attribution per request
+- Outbound proxy pool for reaching upstreams through rotating proxies
 - API key authentication (`zr_…` keys, only hashes stored)
 - SQLite persistence, pure Go — no cgo, `CGO_ENABLED=0` friendly
 - Prometheus metrics at `/metrics`
@@ -173,7 +180,7 @@ validate                     load and validate the configuration
 keys create --name <name>    create a gateway key, print it once
 keys list                    list keys with creation and last-used times
 keys revoke <id>             delete a key
-models                       print the alias → provider/model/fallback table
+models                       print the alias and combo routing tables
 version                      print the build version
 ```
 
@@ -186,7 +193,7 @@ version                      print the build version
 | Method | Path | Description |
 |---|---|---|
 | `POST` | `/v1/chat/completions` | OpenAI chat completions, streaming and non-streaming |
-| `GET` | `/v1/models` | Configured aliases |
+| `GET` | `/v1/models` | Configured aliases and combos |
 
 ### Operations (no auth)
 
@@ -199,10 +206,17 @@ version                      print the build version
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/v1/overview` | Request counts, error rate, active streams, resource counts |
+| `GET` | `/api/v1/overview` | Lifetime totals from the usage log plus live counters and resource counts |
+| `GET` | `/api/v1/usage` | Time-bucketed token/cost series for a window (`?hours=`) |
+| `GET` | `/api/v1/usage/recent` | Newest usage events (`?limit=`) |
 | `GET` `POST` `DELETE` | `/api/v1/keys[/{id}]` | Gateway keys; the raw key is returned only on create |
+| `GET` | `/api/v1/provider-catalog` | Presets for known upstreams |
 | `GET` `PUT` `DELETE` | `/api/v1/providers[/{name}]` | Providers; secrets are never serialised back, an omitted `api_key` keeps the stored one |
+| `GET` `POST` | `/api/v1/providers/{name}/catalog`, `…/import` | List a provider's upstream models and import them as aliases |
 | `GET` `PUT` `DELETE` | `/api/v1/models[/{alias}]` | Model aliases and fallback chains |
+| `POST` | `/api/v1/models/{alias}/test` | Fire a minimal completion through an alias |
+| `GET` `PUT` `DELETE` | `/api/v1/combos[/{name}]` | Combos: virtual models backed by a pool of aliases |
+| `GET` `PUT` `POST` `DELETE` | `/api/v1/proxies[/{name}]`, `…/import` | Outbound proxy pool |
 | `GET` `PUT` | `/api/v1/settings` | Key/value settings |
 
 Every mutation republishes the routing table in place — no restart needed.
@@ -211,9 +225,11 @@ Every mutation republishes the routing table in place — no restart needed.
 
 ## Dashboard
 
-A separate Next.js app in `apps/dashboard` — Overview, Models, Providers, API
-Keys and Settings — talking only to `/api/v1`. No model traffic passes through
-it.
+A separate Next.js app in `apps/dashboard` — Overview, Models, Providers,
+Combos, Proxies, API Keys and Settings — talking only to `/api/v1`. No model
+traffic passes through it. The Overview page charts lifetime totals, cost and
+token series from the usage log, the most recently used models, and the latest
+requests.
 
 ```sh
 cd apps/dashboard
@@ -221,6 +237,9 @@ cp .env.example .env.local     # NEXT_PUBLIC_ROUTER_URL, defaults to :8787
 npm install
 npm run dev                    # http://localhost:3000
 ```
+
+Or run the router and the dashboard together from the repository root with
+`make dev`; Ctrl-C stops both.
 
 The router must have `admin.enabled: true` and list the dashboard origin under
 `admin.cors_origins`. The admin token is entered in the browser and kept in
@@ -239,6 +258,31 @@ immediately without fallback. For streaming, fallback is only possible before
 the first chunk is flushed; once bytes are on the wire the response is
 committed.
 
+### Combos
+
+A combo is a virtual model: one client-facing name backed by an ordered pool of
+aliases. Requesting the combo expands it into a chain — each member followed by
+that member's own fallbacks — so a single name can span several providers and
+accounts.
+
+| Strategy | Behaviour |
+|---|---|
+| `fallback` | Always start at the first member and cascade down the pool. |
+| `round_robin` | Rotate the starting member per request to spread quota, then cascade. |
+
+```sh
+curl -X PUT http://localhost:8787/api/v1/combos/code-agent \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"strategy":"round_robin","members":["gpt-5","fast","local"],"enabled":true}'
+```
+
+Combos are addressable wherever a model is: `"model": "code-agent"` on
+`/v1/chat/completions`, and they appear in `GET /v1/models`. A combo never
+shadows a real alias of the same name, members must be existing aliases, and
+deleting a provider strips its aliases from every pool — a combo left without
+members is dropped rather than routing into thin air.
+
 ---
 
 ## Metrics
@@ -253,6 +297,17 @@ committed.
 
 Token counts come from upstream `usage` when reported and are estimated
 (~4 characters per token) otherwise, including for streams.
+
+### Usage log
+
+Prometheus counters reset with the process, so the dashboard reads from a
+durable per-request log in SQLite instead. Every request that reaches a
+provider is recorded — successful ones with tokens and cost, failed ones with
+their failure class (`timeout`, `rate_limited`, `upstream_5xx`, `connection`,
+`canceled`, `client_error`) — so lifetime totals and error rates survive
+restarts and count every hit on a model. One request is one row, regardless of
+retries and fallbacks. Costs come from the built-in pricing table in
+`internal/pricing`.
 
 ---
 
@@ -314,6 +369,7 @@ make snapshot                  # goreleaser tarballs without tagging
 ```sh
 make build    # static binary into bin/
 make run      # go run with config.yaml
+make dev      # router + dashboard together
 make test     # go test ./...
 make race     # go test -race ./...
 make lint     # golangci-lint run ./...
@@ -327,14 +383,15 @@ Layout:
 cmd/server        entrypoint, CLI, dependency wiring
 internal/api      HTTP transport: gateway, admin, middleware
 internal/router   alias resolution, fallback chain, retry
-internal/provider provider implementations and upstream error mapping
+internal/provider provider implementations, catalog presets, upstream error mapping
 internal/stream   SSE writer and relay
 internal/storage  SQLite and in-memory stores, migrations
 internal/auth     key hashing, generation, authentication
+internal/pricing  static price table for cost attribution
 internal/config   YAML loading, validation, live reload
 internal/metrics  private Prometheus registry
 pkg/openai        OpenAI wire types
-apps/dashboard    Next.js dashboard (Overview, Models, Providers, Keys, Settings)
+apps/dashboard    Next.js dashboard (Overview, Models, Providers, Combos, Proxies, Keys, Settings)
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution workflow, `PRD.md`

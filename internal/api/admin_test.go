@@ -12,6 +12,7 @@ import (
 	"github.com/zealish/zealish-router/internal/auth"
 	"github.com/zealish/zealish-router/internal/config"
 	"github.com/zealish/zealish-router/internal/metrics"
+	"github.com/zealish/zealish-router/internal/provider"
 	"github.com/zealish/zealish-router/internal/router"
 	"github.com/zealish/zealish-router/internal/storage"
 )
@@ -30,7 +31,7 @@ func newAdminServer(t *testing.T) (http.Handler, storage.Store, *router.Engine) 
 	collector := metrics.New()
 	store := storage.NewMemory()
 	engine := router.NewEngine(logger, collector)
-	loader := router.NewLoader(store.Providers(), store.Models(), engine)
+	loader := router.NewLoader(store.Providers(), store.Models(), store.Combos(), store.Proxies(), engine)
 
 	deps := Dependencies{
 		Config:    cfg,
@@ -232,6 +233,36 @@ func TestAdminProviderMutationRepublishesRoutes(t *testing.T) {
 	}
 }
 
+func TestAdminAliasWithSlashRoundTrips(t *testing.T) {
+	h, _, engine := newAdminServer(t)
+
+	adminRequest(t, h, http.MethodPut, "/api/v1/providers/weizerouter",
+		`{"kind":"openai","base_url":"https://example.test/v1","api_key":"sk-test","enabled":true}`)
+
+	// Clients percent-encode the slash; the handler must decode it so the
+	// stored alias matches what /v1 callers send as "model".
+	rec := adminRequest(t, h, http.MethodPut, "/api/v1/models/wz%2Fgemini-3.8-flash",
+		`{"provider":"weizerouter","model":"wz/gemini-3.8-flash"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("put alias status = %d (body=%q)", rec.Code, rec.Body.String())
+	}
+
+	route, err := engine.Resolve("wz/gemini-3.8-flash")
+	if err != nil {
+		t.Fatalf("Resolve encoded alias: %v", err)
+	}
+	if route.Provider != "weizerouter" || route.Model != "wz/gemini-3.8-flash" {
+		t.Errorf("route = %+v, want weizerouter/wz/gemini-3.8-flash", route)
+	}
+
+	if got := adminRequest(t, h, http.MethodDelete, "/api/v1/models/wz%2Fgemini-3.8-flash", "").Code; got != http.StatusNoContent {
+		t.Fatalf("delete encoded alias status = %d, want 204", got)
+	}
+	if _, err := engine.Resolve("wz/gemini-3.8-flash"); err == nil {
+		t.Error("deleted alias still resolves")
+	}
+}
+
 func TestAdminProviderSecretNotExposed(t *testing.T) {
 	h, store, _ := newAdminServer(t)
 
@@ -261,6 +292,65 @@ func TestAdminProviderSecretNotExposed(t *testing.T) {
 	}
 	if stored.BaseURL != "https://proxy.example.com/v1" {
 		t.Errorf("base url = %q, want the updated value", stored.BaseURL)
+	}
+}
+
+func TestAdminProviderGroups(t *testing.T) {
+	h, store, _ := newAdminServer(t)
+
+	// A catalogue entry supplies the endpoint and dialect; only the key is sent.
+	rec := adminRequest(t, h, http.MethodPut, "/api/v1/providers/commandcode",
+		`{"group":"api_key","catalog_id":"commandcode","api_key":"cc-key","enabled":true}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("put catalogue provider status = %d (body=%q)", rec.Code, rec.Body.String())
+	}
+	stored, err := store.Providers().Get(t.Context(), "commandcode")
+	if err != nil {
+		t.Fatalf("Get provider: %v", err)
+	}
+	if stored.BaseURL != "https://api.commandcode.ai/provider/v1" || stored.Kind != provider.KindAnthropic {
+		t.Errorf("stored = %+v, want the catalogue base url and anthropic kind", stored)
+	}
+
+	// Custom providers still need their own base URL.
+	rec = adminRequest(t, h, http.MethodPut, "/api/v1/providers/local",
+		`{"group":"custom","kind":"anthropic","enabled":true}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 without a base_url", rec.Code)
+	}
+
+	// Key- and OAuth-backed providers are useless without a credential.
+	rec = adminRequest(t, h, http.MethodPut, "/api/v1/providers/claude",
+		`{"group":"oauth","kind":"anthropic","base_url":"https://api.anthropic.com/v1","enabled":true}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 without a credential", rec.Code)
+	}
+
+	rec = adminRequest(t, h, http.MethodPut, "/api/v1/providers/ghost",
+		`{"group":"nope","base_url":"https://example.test/v1"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 for an unknown group", rec.Code)
+	}
+}
+
+func TestAdminProviderCatalogPresets(t *testing.T) {
+	h, _, _ := newAdminServer(t)
+
+	all := decodeJSON[[]provider.CatalogEntry](t,
+		adminRequest(t, h, http.MethodGet, "/api/v1/provider-catalog", ""))
+	if len(all) == 0 {
+		t.Fatal("catalogue is empty")
+	}
+
+	keyed := decodeJSON[[]provider.CatalogEntry](t,
+		adminRequest(t, h, http.MethodGet, "/api/v1/provider-catalog?group=api_key", ""))
+	for _, e := range keyed {
+		if e.Group != provider.GroupAPIKey {
+			t.Errorf("entry %s has group %s, want api_key", e.ID, e.Group)
+		}
+	}
+	if len(keyed) == 0 || len(keyed) == len(all) {
+		t.Errorf("group filter returned %d of %d entries", len(keyed), len(all))
 	}
 }
 
@@ -312,5 +402,209 @@ func TestAdminOverviewCountsResources(t *testing.T) {
 	// Every admin call above was instrumented, so requests must be non-zero.
 	if overview.Requests == 0 {
 		t.Error("overview reported zero requests")
+	}
+}
+
+// newUpstream serves an OpenAI-style /models catalogue.
+func newUpstream(t *testing.T, ids ...string) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/models" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		data := make([]map[string]string, 0, len(ids))
+		for _, id := range ids {
+			data = append(data, map[string]string{"id": id, "owned_by": "acme"})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": data})
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+func TestAdminProviderCatalogAndImport(t *testing.T) {
+	h, _, engine := newAdminServer(t)
+	base := newUpstream(t, "gpt-5", "o3")
+
+	adminRequest(t, h, http.MethodPut, "/api/v1/providers/acme",
+		`{"kind":"openai","base_url":"`+base+`","timeout_ms":5000,"enabled":true}`)
+
+	catalog := decodeJSON[[]catalogModelResponse](t,
+		adminRequest(t, h, http.MethodGet, "/api/v1/providers/acme/catalog", ""))
+	if len(catalog) != 2 || catalog[0].ID != "gpt-5" || catalog[0].Imported {
+		t.Fatalf("catalog = %+v, want two un-imported models", catalog)
+	}
+
+	rec := adminRequest(t, h, http.MethodPost, "/api/v1/providers/acme/import",
+		`{"models":["gpt-5","o3"],"prefix":"acme/"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("import status = %d (body=%q)", rec.Code, rec.Body.String())
+	}
+	result := decodeJSON[importModelsResponse](t, rec)
+	if len(result.Imported) != 2 || len(result.Skipped) != 0 {
+		t.Fatalf("import result = %+v, want two imported aliases", result)
+	}
+
+	route, err := engine.Resolve("acme/gpt-5")
+	if err != nil {
+		t.Fatalf("Resolve imported alias: %v", err)
+	}
+	if route.Provider != "acme" || route.Model != "gpt-5" {
+		t.Errorf("route = %+v, want acme/gpt-5", route)
+	}
+
+	// A second import is a no-op unless overwrite is requested.
+	again := decodeJSON[importModelsResponse](t, adminRequest(t, h, http.MethodPost,
+		"/api/v1/providers/acme/import", `{"models":["gpt-5"],"prefix":"acme/"}`))
+	if len(again.Imported) != 0 || len(again.Skipped) != 1 {
+		t.Errorf("re-import = %+v, want the existing alias skipped", again)
+	}
+
+	catalog = decodeJSON[[]catalogModelResponse](t,
+		adminRequest(t, h, http.MethodGet, "/api/v1/providers/acme/catalog", ""))
+	if !catalog[0].Imported || catalog[0].Alias != "acme/gpt-5" {
+		t.Errorf("catalog[0] = %+v, want it marked as imported", catalog[0])
+	}
+}
+
+// Two providers advertising the same upstream model must not collide: each
+// provider's configured alias prefix namespaces its imports.
+func TestAdminImportUsesProviderAliasPrefix(t *testing.T) {
+	h, _, engine := newAdminServer(t)
+	first := newUpstream(t, "gpt-5")
+	second := newUpstream(t, "gpt-5")
+
+	adminRequest(t, h, http.MethodPut, "/api/v1/providers/acme",
+		`{"kind":"openai","base_url":"`+first+`","timeout_ms":5000,"enabled":true,"alias_prefix":"acme/"}`)
+	adminRequest(t, h, http.MethodPut, "/api/v1/providers/globex",
+		`{"kind":"openai","base_url":"`+second+`","timeout_ms":5000,"enabled":true,"alias_prefix":"globex/"}`)
+
+	listed := decodeJSON[[]providerResponse](t,
+		adminRequest(t, h, http.MethodGet, "/api/v1/providers", ""))
+	if len(listed) != 2 || listed[0].AliasPrefix != "acme/" {
+		t.Fatalf("providers = %+v, want the alias prefix round-tripped", listed)
+	}
+
+	// Omitting "prefix" falls back to each provider's configured prefix.
+	for _, name := range []string{"acme", "globex"} {
+		result := decodeJSON[importModelsResponse](t, adminRequest(t, h, http.MethodPost,
+			"/api/v1/providers/"+name+"/import", `{"models":["gpt-5"]}`))
+		if len(result.Imported) != 1 || result.Imported[0].Alias != name+"/gpt-5" {
+			t.Fatalf("%s import = %+v, want alias %s/gpt-5", name, result, name)
+		}
+	}
+
+	for _, name := range []string{"acme", "globex"} {
+		route, err := engine.Resolve(name + "/gpt-5")
+		if err != nil {
+			t.Fatalf("Resolve %s/gpt-5: %v", name, err)
+		}
+		if route.Provider != name {
+			t.Errorf("%s/gpt-5 routes to %q, want %q", name, route.Provider, name)
+		}
+	}
+
+	// An alias owned by another provider is skipped even with overwrite set.
+	stolen := decodeJSON[importModelsResponse](t, adminRequest(t, h, http.MethodPost,
+		"/api/v1/providers/globex/import",
+		`{"models":["gpt-5"],"prefix":"acme/","overwrite":true}`))
+	if len(stolen.Imported) != 0 || len(stolen.Skipped) != 1 {
+		t.Fatalf("cross-provider import = %+v, want the alias skipped", stolen)
+	}
+	if route, _ := engine.Resolve("acme/gpt-5"); route.Provider != "acme" {
+		t.Errorf("acme/gpt-5 rerouted to %q", route.Provider)
+	}
+}
+
+func TestAdminCatalogUnknownProvider(t *testing.T) {
+	h, _, _ := newAdminServer(t)
+
+	if got := adminRequest(t, h, http.MethodGet, "/api/v1/providers/nope/catalog", "").Code; got != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 for an unknown provider", got)
+	}
+}
+
+func TestAdminCatalogUpstreamFailure(t *testing.T) {
+	h, _, _ := newAdminServer(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":{"message":"bad key"}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	adminRequest(t, h, http.MethodPut, "/api/v1/providers/acme",
+		`{"base_url":"`+srv.URL+`","timeout_ms":5000,"enabled":true}`)
+
+	rec := adminRequest(t, h, http.MethodGet, "/api/v1/providers/acme/catalog", "")
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 (body=%q)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "bad key") {
+		t.Errorf("body = %q, want the upstream message", rec.Body.String())
+	}
+}
+
+func TestAdminTestAlias(t *testing.T) {
+	h, _, _ := newAdminServer(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"x","object":"chat.completion","choices":[]}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	adminRequest(t, h, http.MethodPut, "/api/v1/providers/acme",
+		`{"base_url":"`+srv.URL+`","timeout_ms":5000,"enabled":true}`)
+	adminRequest(t, h, http.MethodPut, "/api/v1/models/acme%2Fgpt-5",
+		`{"provider":"acme","model":"gpt-5"}`)
+
+	rec := adminRequest(t, h, http.MethodPost, "/api/v1/models/acme%2Fgpt-5/test", `{}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (body=%q)", rec.Code, rec.Body.String())
+	}
+	result := decodeJSON[testAliasResponse](t, rec)
+	if !result.OK || result.Error != "" {
+		t.Errorf("result = %+v, want a successful probe", result)
+	}
+	if result.Provider != "acme" || result.Model != "gpt-5" {
+		t.Errorf("result = %+v, want the alias's own route", result)
+	}
+}
+
+// A failing upstream is a reported result, not a failed request: the dashboard
+// renders the error next to the alias.
+func TestAdminTestAliasUpstreamFailure(t *testing.T) {
+	h, _, _ := newAdminServer(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":{"message":"bad key"}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	adminRequest(t, h, http.MethodPut, "/api/v1/providers/acme",
+		`{"base_url":"`+srv.URL+`","timeout_ms":5000,"enabled":true}`)
+	adminRequest(t, h, http.MethodPut, "/api/v1/models/gpt-5",
+		`{"provider":"acme","model":"gpt-5"}`)
+
+	rec := adminRequest(t, h, http.MethodPost, "/api/v1/models/gpt-5/test", `{}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (body=%q)", rec.Code, rec.Body.String())
+	}
+	result := decodeJSON[testAliasResponse](t, rec)
+	if result.OK || !strings.Contains(result.Error, "bad key") {
+		t.Errorf("result = %+v, want a failed probe carrying the upstream message", result)
+	}
+}
+
+func TestAdminTestAliasUnknown(t *testing.T) {
+	h, _, _ := newAdminServer(t)
+
+	if got := adminRequest(t, h, http.MethodPost, "/api/v1/models/ghost/test", `{}`).Code; got != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 for an unknown alias", got)
 	}
 }

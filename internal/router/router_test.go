@@ -121,7 +121,7 @@ func newTestEngine(t *testing.T, rec Recorder, providers ...provider.Provider) *
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	e := NewEngine(logger, rec)
-	e.Reload(aliases, provider.NewRegistry(providers...))
+	e.Reload(aliases, nil, provider.NewRegistry(providers...))
 	e.retry = Retry{Attempts: 1}
 	return e
 }
@@ -225,7 +225,7 @@ func TestChainDeduplicatesAndCaps(t *testing.T) {
 	e := newTestEngine(t, nil, &fakeProvider{name: "openai"})
 	e.Reload([]storage.ModelAlias{
 		{Alias: "gpt-5", Provider: "openai", Model: "m", Fallback: []string{"fast", "gpt-5", "fast", "local"}},
-	}, provider.NewRegistry(&fakeProvider{name: "openai"}))
+	}, nil, provider.NewRegistry(&fakeProvider{name: "openai"}))
 
 	got := e.Chain("gpt-5")
 	want := []string{"gpt-5", "fast", "local"}

@@ -88,7 +88,7 @@ func newTestServerWithConfig(t *testing.T, p provider.Provider, tweak func(*conf
 	engine.Reload([]storage.ModelAlias{
 		{Alias: "gpt-5", Provider: "openai", Model: "gpt-5-upstream"},
 		{Alias: "fast", Provider: "openai", Model: "gpt-5-mini"},
-	}, provider.NewRegistry(p))
+	}, nil, provider.NewRegistry(p))
 
 	deps := Dependencies{
 		Config:  cfg,

@@ -30,12 +30,13 @@ func (h *handler) health(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (h *handler) listModels(w http.ResponseWriter, _ *http.Request) {
-	aliases := h.engine.Aliases()
-	sort.Strings(aliases)
+	// Combos are addressable model names too, so clients see one flat list.
+	names := append(h.engine.Aliases(), h.engine.Combos()...)
+	sort.Strings(names)
 
-	list := openai.ModelList{Object: "list", Data: make([]openai.Model, 0, len(aliases))}
-	for _, alias := range aliases {
-		list.Data = append(list.Data, openai.Model{ID: alias, Object: "model"})
+	list := openai.ModelList{Object: "list", Data: make([]openai.Model, 0, len(names))}
+	for _, name := range names {
+		list.Data = append(list.Data, openai.Model{ID: name, Object: "model"})
 	}
 	writeJSON(w, http.StatusOK, list)
 }

@@ -146,7 +146,7 @@ func keysCommand(cfg *config.Config, args []string) error {
 	}
 }
 
-// modelsCommand prints the stored alias routing table.
+// modelsCommand prints the stored alias routing table and the combos on top.
 func modelsCommand(cfg *config.Config) error {
 	ctx := context.Background()
 	store, err := storage.OpenSQLite(ctx, cfg.Database.Path)
@@ -159,6 +159,10 @@ func modelsCommand(cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
+	combos, err := store.Combos().List(ctx)
+	if err != nil {
+		return err
+	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(w, "ALIAS\tPROVIDER\tMODEL\tFALLBACK")
@@ -168,6 +172,13 @@ func modelsCommand(cfg *config.Config) error {
 			fallback = strings.Join(m.Fallback, " → ")
 		}
 		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", m.Alias, m.Provider, m.Model, fallback)
+	}
+	if len(combos) > 0 {
+		_, _ = fmt.Fprintln(w, "\nCOMBO\tSTRATEGY\tENABLED\tMEMBERS")
+		for _, c := range combos {
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%t\t%s\n",
+				c.Name, c.Strategy, c.Enabled, strings.Join(c.Members, " → "))
+		}
 	}
 	return w.Flush()
 }
@@ -185,7 +196,8 @@ func serve(cfg *config.Config, configPath string, logger *slog.Logger) error {
 
 	collector := metrics.New()
 	engine := router.NewEngine(logger, collector)
-	loader := router.NewLoader(store.Providers(), store.Models(), engine)
+	engine.SetUsageStore(store.Usage())
+	loader := router.NewLoader(store.Providers(), store.Models(), store.Combos(), store.Proxies(), engine)
 	if err := loader.Load(ctx); err != nil {
 		return err
 	}

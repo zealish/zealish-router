@@ -28,7 +28,10 @@ type SQLite struct {
 	keys      *sqliteAPIKeys
 	providers *sqliteProviders
 	models    *sqliteModels
+	combos    *sqliteCombos
+	proxies   *sqliteProxies
 	settings  *sqliteSettings
+	usage     *sqliteUsage
 }
 
 // OpenSQLite opens (creating if needed) the database at path, creates its
@@ -64,7 +67,10 @@ func OpenSQLite(ctx context.Context, path string) (*SQLite, error) {
 		keys:      &sqliteAPIKeys{db: db},
 		providers: &sqliteProviders{db: db},
 		models:    &sqliteModels{db: db},
+		combos:    &sqliteCombos{db: db},
+		proxies:   &sqliteProxies{db: db},
 		settings:  &sqliteSettings{db: db},
+		usage:     &sqliteUsage{db: db},
 	}, nil
 }
 
@@ -143,8 +149,17 @@ func (s *SQLite) Providers() ProviderStore { return s.providers }
 // Models implements Store.
 func (s *SQLite) Models() ModelStore { return s.models }
 
+// Combos implements Store.
+func (s *SQLite) Combos() ComboStore { return s.combos }
+
+// Proxies implements Store.
+func (s *SQLite) Proxies() ProxyStore { return s.proxies }
+
 // Settings implements Store.
 func (s *SQLite) Settings() SettingStore { return s.settings }
+
+// Usage implements Store.
+func (s *SQLite) Usage() UsageStore { return s.usage }
 
 // Close implements Store.
 func (s *SQLite) Close() error { return s.db.Close() }
@@ -263,7 +278,7 @@ type sqliteProviders struct {
 	db *sql.DB
 }
 
-const providerColumns = `id, name, kind, base_url, api_key, timeout_ms, enabled`
+const providerColumns = `id, name, kind, base_url, api_key, timeout_ms, enabled, alias_prefix, provider_group, catalog_id, use_proxy_pool`
 
 func (s *sqliteProviders) List(ctx context.Context) ([]Provider, error) {
 	rows, err := s.db.QueryContext(ctx,
@@ -305,26 +320,134 @@ func (s *sqliteProviders) Get(ctx context.Context, name string) (Provider, error
 func (s *sqliteProviders) Put(ctx context.Context, p Provider) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO providers (`+providerColumns+`)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(name) DO UPDATE SET
 		   kind = excluded.kind,
 		   base_url = excluded.base_url,
 		   api_key = excluded.api_key,
 		   timeout_ms = excluded.timeout_ms,
-		   enabled = excluded.enabled`,
-		p.ID, p.Name, p.Kind, p.BaseURL, p.APIKey, p.Timeout.Milliseconds(), p.Enabled)
+		   enabled = excluded.enabled,
+		   alias_prefix = excluded.alias_prefix,
+		   provider_group = excluded.provider_group,
+		   catalog_id = excluded.catalog_id,
+		   use_proxy_pool = excluded.use_proxy_pool`,
+		p.ID, p.Name, p.Kind, p.BaseURL, p.APIKey, p.Timeout.Milliseconds(), p.Enabled, p.AliasPrefix,
+		p.Group, p.CatalogID, p.UseProxyPool)
 	if err != nil {
 		return fmt.Errorf("storage: put provider: %w", err)
 	}
 	return nil
 }
 
+// Delete removes the provider and everything that only exists because of it:
+// its model aliases, references to those aliases in other fallback chains and
+// combos, and its usage log. Nothing orphaned survives the provider it belongs
+// to.
 func (s *sqliteProviders) Delete(ctx context.Context, name string) error {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM providers WHERE name = ?`, name)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("storage: delete provider: %w", err)
 	}
-	return affectOne(res, "delete provider")
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx, `DELETE FROM providers WHERE name = ?`, name)
+	if err != nil {
+		return fmt.Errorf("storage: delete provider: %w", err)
+	}
+	if err := affectOne(res, "delete provider"); err != nil {
+		return err
+	}
+
+	dropped, err := deleteProviderAliases(ctx, tx, name)
+	if err != nil {
+		return err
+	}
+	if err := pruneFallbacks(ctx, tx, dropped); err != nil {
+		return err
+	}
+	if err := pruneComboMembers(ctx, tx, dropped); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM usage_events WHERE provider = ?`, name); err != nil {
+		return fmt.Errorf("storage: delete provider usage: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("storage: delete provider: %w", err)
+	}
+	return nil
+}
+
+// deleteProviderAliases removes the provider's aliases and reports their names.
+func deleteProviderAliases(ctx context.Context, tx *sql.Tx, provider string) (map[string]bool, error) {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT alias FROM model_aliases WHERE provider = ?`, provider)
+	if err != nil {
+		return nil, fmt.Errorf("storage: list provider aliases: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	dropped := map[string]bool{}
+	for rows.Next() {
+		var alias string
+		if err := rows.Scan(&alias); err != nil {
+			return nil, fmt.Errorf("storage: scan provider alias: %w", err)
+		}
+		dropped[alias] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("storage: list provider aliases: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM model_aliases WHERE provider = ?`, provider); err != nil {
+		return nil, fmt.Errorf("storage: delete provider aliases: %w", err)
+	}
+	return dropped, nil
+}
+
+// pruneFallbacks strips deleted aliases from the fallback chains that still
+// point at them, so routing never resolves a dangling alias.
+func pruneFallbacks(ctx context.Context, tx *sql.Tx, dropped map[string]bool) error {
+	if len(dropped) == 0 {
+		return nil
+	}
+
+	rows, err := tx.QueryContext(ctx,
+		`SELECT alias, fallback FROM model_aliases WHERE fallback <> ''`)
+	if err != nil {
+		return fmt.Errorf("storage: list fallback chains: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	updates := map[string]string{}
+	for rows.Next() {
+		var alias, fallback string
+		if err := rows.Scan(&alias, &fallback); err != nil {
+			return fmt.Errorf("storage: scan fallback chain: %w", err)
+		}
+		chain := decodeFallback(fallback)
+		kept := make([]string, 0, len(chain))
+		for _, ref := range chain {
+			if !dropped[ref] {
+				kept = append(kept, ref)
+			}
+		}
+		if len(kept) != len(chain) {
+			updates[alias] = encodeFallback(kept)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("storage: list fallback chains: %w", err)
+	}
+
+	for alias, fallback := range updates {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE model_aliases SET fallback = ? WHERE alias = ?`, fallback, alias); err != nil {
+			return fmt.Errorf("storage: prune fallback chain: %w", err)
+		}
+	}
+	return nil
 }
 
 func scanProvider(src scanner) (Provider, error) {
@@ -332,7 +455,8 @@ func scanProvider(src scanner) (Provider, error) {
 		p         Provider
 		timeoutMS int64
 	)
-	if err := src.Scan(&p.ID, &p.Name, &p.Kind, &p.BaseURL, &p.APIKey, &timeoutMS, &p.Enabled); err != nil {
+	if err := src.Scan(&p.ID, &p.Name, &p.Kind, &p.BaseURL, &p.APIKey, &timeoutMS, &p.Enabled,
+		&p.AliasPrefix, &p.Group, &p.CatalogID, &p.UseProxyPool); err != nil {
 		return Provider{}, err
 	}
 	p.Timeout = time.Duration(timeoutMS) * time.Millisecond
@@ -427,6 +551,195 @@ func decodeFallback(raw string) []string {
 	return strings.Split(raw, ",")
 }
 
+type sqliteCombos struct {
+	db *sql.DB
+}
+
+func (s *sqliteCombos) List(ctx context.Context) ([]Combo, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT name, strategy, members, enabled FROM combos ORDER BY name`)
+	if err != nil {
+		return nil, fmt.Errorf("storage: list combos: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []Combo
+	for rows.Next() {
+		c, err := scanCombo(rows)
+		if err != nil {
+			return nil, fmt.Errorf("storage: scan combo: %w", err)
+		}
+		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("storage: list combos: %w", err)
+	}
+	return out, nil
+}
+
+func (s *sqliteCombos) Get(ctx context.Context, name string) (Combo, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT name, strategy, members, enabled FROM combos WHERE name = ?`, name)
+
+	c, err := scanCombo(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Combo{}, ErrNotFound
+	}
+	if err != nil {
+		return Combo{}, fmt.Errorf("storage: get combo: %w", err)
+	}
+	return c, nil
+}
+
+func (s *sqliteCombos) Put(ctx context.Context, c Combo) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO combos (name, strategy, members, enabled)
+		 VALUES (?, ?, ?, ?)
+		 ON CONFLICT(name) DO UPDATE SET
+		   strategy = excluded.strategy,
+		   members = excluded.members,
+		   enabled = excluded.enabled`,
+		c.Name, string(c.Strategy), encodeFallback(c.Members), c.Enabled)
+	if err != nil {
+		return fmt.Errorf("storage: put combo: %w", err)
+	}
+	return nil
+}
+
+func (s *sqliteCombos) Delete(ctx context.Context, name string) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM combos WHERE name = ?`, name)
+	if err != nil {
+		return fmt.Errorf("storage: delete combo: %w", err)
+	}
+	return affectOne(res, "delete combo")
+}
+
+type sqliteProxies struct {
+	db *sql.DB
+}
+
+func (s *sqliteProxies) List(ctx context.Context) ([]Proxy, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT name, url, enabled FROM proxies ORDER BY name`)
+	if err != nil {
+		return nil, fmt.Errorf("storage: list proxies: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []Proxy
+	for rows.Next() {
+		var p Proxy
+		if err := rows.Scan(&p.Name, &p.URL, &p.Enabled); err != nil {
+			return nil, fmt.Errorf("storage: scan proxy: %w", err)
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("storage: list proxies: %w", err)
+	}
+	return out, nil
+}
+
+func (s *sqliteProxies) Get(ctx context.Context, name string) (Proxy, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT name, url, enabled FROM proxies WHERE name = ?`, name)
+
+	var p Proxy
+	err := row.Scan(&p.Name, &p.URL, &p.Enabled)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Proxy{}, ErrNotFound
+	}
+	if err != nil {
+		return Proxy{}, fmt.Errorf("storage: get proxy: %w", err)
+	}
+	return p, nil
+}
+
+func (s *sqliteProxies) Put(ctx context.Context, p Proxy) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO proxies (name, url, enabled)
+		 VALUES (?, ?, ?)
+		 ON CONFLICT(name) DO UPDATE SET
+		   url = excluded.url,
+		   enabled = excluded.enabled`,
+		p.Name, p.URL, p.Enabled)
+	if err != nil {
+		return fmt.Errorf("storage: put proxy: %w", err)
+	}
+	return nil
+}
+
+func (s *sqliteProxies) Delete(ctx context.Context, name string) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM proxies WHERE name = ?`, name)
+	if err != nil {
+		return fmt.Errorf("storage: delete proxy: %w", err)
+	}
+	return affectOne(res, "delete proxy")
+}
+
+// pruneComboMembers strips deleted aliases from every combo pool and removes
+// the combos left without a single member, so no combo routes into thin air.
+func pruneComboMembers(ctx context.Context, tx *sql.Tx, dropped map[string]bool) error {
+	if len(dropped) == 0 {
+		return nil
+	}
+
+	rows, err := tx.QueryContext(ctx, `SELECT name, members FROM combos WHERE members <> ''`)
+	if err != nil {
+		return fmt.Errorf("storage: list combos: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	updates := map[string]string{}
+	for rows.Next() {
+		var name, members string
+		if err := rows.Scan(&name, &members); err != nil {
+			return fmt.Errorf("storage: scan combo members: %w", err)
+		}
+		pool := decodeFallback(members)
+		kept := make([]string, 0, len(pool))
+		for _, member := range pool {
+			if !dropped[member] {
+				kept = append(kept, member)
+			}
+		}
+		if len(kept) != len(pool) {
+			updates[name] = encodeFallback(kept)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("storage: list combos: %w", err)
+	}
+
+	for name, members := range updates {
+		if members == "" {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM combos WHERE name = ?`, name); err != nil {
+				return fmt.Errorf("storage: delete empty combo: %w", err)
+			}
+			continue
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE combos SET members = ? WHERE name = ?`, members, name); err != nil {
+			return fmt.Errorf("storage: prune combo members: %w", err)
+		}
+	}
+	return nil
+}
+
+func scanCombo(src scanner) (Combo, error) {
+	var (
+		c        Combo
+		strategy string
+		members  string
+	)
+	if err := src.Scan(&c.Name, &strategy, &members, &c.Enabled); err != nil {
+		return Combo{}, err
+	}
+	c.Strategy = ComboStrategy(strategy)
+	c.Members = decodeFallback(members)
+	return c, nil
+}
+
 type sqliteSettings struct {
 	db *sql.DB
 }
@@ -460,4 +773,129 @@ func (s *sqliteSettings) Put(ctx context.Context, key, value string) error {
 		return fmt.Errorf("storage: put setting: %w", err)
 	}
 	return nil
+}
+
+type sqliteUsage struct {
+	db *sql.DB
+}
+
+const usageColumns = `id, created_at, alias, provider, model, streamed, status, duration_ms,
+	prompt_tokens, completion_tokens, cached_tokens, cache_write_tokens, reasoning_tokens, cost_usd`
+
+func (s *sqliteUsage) Record(ctx context.Context, e UsageEvent) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO usage_events
+		   (created_at, alias, provider, model, streamed, status, duration_ms,
+		    prompt_tokens, completion_tokens, cached_tokens, cache_write_tokens,
+		    reasoning_tokens, cost_usd)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		e.CreatedAt.Unix(), e.Alias, e.Provider, e.Model, e.Streamed, e.Status,
+		e.Duration.Milliseconds(), e.PromptTokens, e.CompletionTokens, e.CachedTokens,
+		e.CacheWriteTokens, e.ReasoningTokens, e.CostUSD)
+	if err != nil {
+		return fmt.Errorf("storage: record usage: %w", err)
+	}
+	return nil
+}
+
+func (s *sqliteUsage) Recent(ctx context.Context, limit int) ([]UsageEvent, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+usageColumns+` FROM usage_events ORDER BY created_at DESC, id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("storage: recent usage: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []UsageEvent
+	for rows.Next() {
+		e, err := scanUsageEvent(rows)
+		if err != nil {
+			return nil, fmt.Errorf("storage: scan usage event: %w", err)
+		}
+		out = append(out, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("storage: recent usage: %w", err)
+	}
+	return out, nil
+}
+
+func (s *sqliteUsage) Totals(ctx context.Context, since time.Time) (UsageTotals, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*),
+		        COALESCE(SUM(status <> 'ok'), 0),
+		        COALESCE(SUM(prompt_tokens), 0),
+		        COALESCE(SUM(completion_tokens), 0),
+		        COALESCE(SUM(cached_tokens), 0),
+		        COALESCE(SUM(cost_usd), 0)
+		 FROM usage_events WHERE created_at >= ?`, since.Unix())
+
+	var t UsageTotals
+	if err := row.Scan(&t.Requests, &t.Errors, &t.PromptTokens,
+		&t.CompletionTokens, &t.CachedTokens, &t.CostUSD); err != nil {
+		return UsageTotals{}, fmt.Errorf("storage: usage totals: %w", err)
+	}
+	return t, nil
+}
+
+func (s *sqliteUsage) Series(ctx context.Context, since time.Time, bucket time.Duration) ([]UsageBucket, error) {
+	seconds := int64(bucket.Seconds())
+	if seconds <= 0 {
+		return nil, nil
+	}
+
+	// Integer division floors each timestamp onto its bucket start.
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT (created_at / ?) * ? AS start,
+		        COUNT(*),
+		        COALESCE(SUM(prompt_tokens), 0),
+		        COALESCE(SUM(completion_tokens), 0),
+		        COALESCE(SUM(cached_tokens), 0),
+		        COALESCE(SUM(cost_usd), 0)
+		 FROM usage_events
+		 WHERE created_at >= ?
+		 GROUP BY start
+		 ORDER BY start`, seconds, seconds, since.Unix())
+	if err != nil {
+		return nil, fmt.Errorf("storage: usage series: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []UsageBucket
+	for rows.Next() {
+		var (
+			start int64
+			b     UsageBucket
+		)
+		if err := rows.Scan(&start, &b.Requests, &b.PromptTokens,
+			&b.CompletionTokens, &b.CachedTokens, &b.CostUSD); err != nil {
+			return nil, fmt.Errorf("storage: scan usage bucket: %w", err)
+		}
+		b.Start = time.Unix(start, 0).UTC()
+		out = append(out, b)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("storage: usage series: %w", err)
+	}
+	return out, nil
+}
+
+func scanUsageEvent(src scanner) (UsageEvent, error) {
+	var (
+		e          UsageEvent
+		createdAt  int64
+		durationMS int64
+	)
+	if err := src.Scan(&e.ID, &createdAt, &e.Alias, &e.Provider, &e.Model,
+		&e.Streamed, &e.Status, &durationMS, &e.PromptTokens, &e.CompletionTokens,
+		&e.CachedTokens, &e.CacheWriteTokens, &e.ReasoningTokens, &e.CostUSD); err != nil {
+		return UsageEvent{}, err
+	}
+	e.CreatedAt = time.Unix(createdAt, 0).UTC()
+	e.Duration = time.Duration(durationMS) * time.Millisecond
+	return e, nil
 }

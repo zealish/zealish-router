@@ -59,6 +59,8 @@ type Route struct {
 // in place.
 type routes struct {
 	models   map[string]storage.ModelAlias
+	combos   map[string]storage.Combo
+	cursors  map[string]*atomic.Uint64
 	registry *provider.Registry
 }
 
@@ -69,8 +71,13 @@ type Engine struct {
 	routes   atomic.Pointer[routes]
 	logger   *slog.Logger
 	recorder Recorder
+	usage    storage.UsageStore
 	retry    Retry
 }
+
+// usageWriteTimeout bounds a single usage-log insert. It runs off the request's
+// context so a finished stream still records after the client disconnects.
+const usageWriteTimeout = 5 * time.Second
 
 // NewEngine constructs a routing engine with an empty routing table. A nil
 // recorder disables telemetry; Reload installs the first table.
@@ -80,18 +87,40 @@ func NewEngine(logger *slog.Logger, rec Recorder) *Engine {
 		recorder: rec,
 		retry:    DefaultRetry,
 	}
-	e.Reload(nil, provider.NewRegistry())
+	e.Reload(nil, nil, provider.NewRegistry())
 	return e
 }
 
-// Reload swaps the routing table for one built from the given aliases and
-// provider registry. In-flight requests keep the snapshot they started with.
-func (e *Engine) Reload(aliases []storage.ModelAlias, registry *provider.Registry) {
+// SetUsageStore installs the durable usage log. A nil store disables usage
+// persistence, which is what tests and the metrics-only path want.
+func (e *Engine) SetUsageStore(s storage.UsageStore) {
+	e.usage = s
+}
+
+// Reload swaps the routing table for one built from the given aliases, combos
+// and provider registry. In-flight requests keep the snapshot they started
+// with; round-robin cursors start over.
+func (e *Engine) Reload(aliases []storage.ModelAlias, combos []storage.Combo, registry *provider.Registry) {
 	models := make(map[string]storage.ModelAlias, len(aliases))
 	for _, m := range aliases {
 		models[m.Alias] = m
 	}
-	e.routes.Store(&routes{models: models, registry: registry})
+
+	pools := make(map[string]storage.Combo, len(combos))
+	cursors := make(map[string]*atomic.Uint64, len(combos))
+	for _, c := range combos {
+		if !c.Enabled || len(c.Members) == 0 {
+			continue
+		}
+		// An alias of the same name wins: it is the concrete route, and a
+		// combo shadowing it would make the alias unreachable.
+		if _, clash := models[c.Name]; clash {
+			continue
+		}
+		pools[c.Name] = c
+		cursors[c.Name] = &atomic.Uint64{}
+	}
+	e.routes.Store(&routes{models: models, combos: pools, cursors: cursors, registry: registry})
 }
 
 // Aliases returns every configured model alias.
@@ -104,53 +133,104 @@ func (e *Engine) Aliases() []string {
 	return aliases
 }
 
-// Resolve maps an alias onto its provider and upstream model name.
-func (e *Engine) Resolve(alias string) (Route, error) {
-	return e.routes.Load().resolve(alias)
-}
-
-func (rt *routes) resolve(alias string) (Route, error) {
-	m, ok := rt.models[alias]
-	if !ok {
-		return Route{}, fmt.Errorf("%w: %s", ErrUnknownModel, alias)
+// Combos returns every routable combo name.
+func (e *Engine) Combos() []string {
+	rt := e.routes.Load()
+	names := make([]string, 0, len(rt.combos))
+	for name := range rt.combos {
+		names = append(names, name)
 	}
-	return Route{Alias: alias, Provider: m.Provider, Model: m.Model}, nil
+	return names
 }
 
-// Chain returns the deterministic attempt order for an alias: the alias itself
-// followed by its configured fallbacks, with duplicates removed and the total
-// length capped.
-func (e *Engine) Chain(alias string) []string {
-	return e.routes.Load().chain(alias)
+// Resolve maps a model name onto its provider and upstream model name. For a
+// combo it reports the route its chain would try first.
+func (e *Engine) Resolve(name string) (Route, error) {
+	return e.routes.Load().resolve(name)
 }
 
-func (rt *routes) chain(alias string) []string {
-	fallback := rt.models[alias].Fallback
-	chain := make([]string, 0, 1+len(fallback))
-	seen := make(map[string]struct{}, cap(chain))
+func (rt *routes) resolve(name string) (Route, error) {
+	m, ok := rt.models[name]
+	if !ok {
+		// A combo is not a route of its own; it reports its first member, so
+		// callers that only want a concrete target get one.
+		if combo, isCombo := rt.combos[name]; isCombo {
+			m, ok = rt.models[combo.Members[0]]
+			name = combo.Members[0]
+		}
+		if !ok {
+			return Route{}, fmt.Errorf("%w: %s", ErrUnknownModel, name)
+		}
+	}
+	return Route{Alias: name, Provider: m.Provider, Model: m.Model}, nil
+}
 
-	for _, candidate := range append([]string{alias}, fallback...) {
+// Chain returns the deterministic attempt order for a model name: for an alias
+// the alias itself followed by its configured fallbacks, for a combo its
+// members in strategy order, each followed by its own fallbacks. Duplicates
+// are removed and the total length capped.
+func (e *Engine) Chain(name string) []string {
+	return e.routes.Load().chain(name)
+}
+
+func (rt *routes) chain(name string) []string {
+	chain := make([]string, 0, maxChainAttempts)
+	seen := make(map[string]struct{}, maxChainAttempts)
+
+	appendCandidate := func(candidate string) bool {
 		if _, dup := seen[candidate]; dup {
-			continue
+			return true
 		}
 		seen[candidate] = struct{}{}
 		chain = append(chain, candidate)
-		if len(chain) == maxChainAttempts {
-			break
+		return len(chain) < maxChainAttempts
+	}
+
+	for _, member := range rt.entrypoints(name) {
+		if !appendCandidate(member) {
+			return chain
+		}
+		for _, fallback := range rt.models[member].Fallback {
+			if !appendCandidate(fallback) {
+				return chain
+			}
 		}
 	}
 	return chain
 }
 
+// entrypoints lists the routes a name starts from: one for a plain alias, the
+// combo pool in strategy order for a combo.
+func (rt *routes) entrypoints(name string) []string {
+	combo, ok := rt.combos[name]
+	if !ok {
+		return []string{name}
+	}
+	if combo.Strategy != storage.ComboRoundRobin {
+		return combo.Members
+	}
+
+	// Round-robin only moves the starting point: the rest of the pool still
+	// follows in order, so a busy member is skipped rather than retried.
+	n := len(combo.Members)
+	start := int(rt.cursors[name].Add(1)-1) % n
+	ordered := make([]string, 0, n)
+	for i := range n {
+		ordered = append(ordered, combo.Members[(start+i)%n])
+	}
+	return ordered
+}
+
 // ChatCompletion routes a non-streaming completion request, advancing through
 // the fallback chain on retryable upstream failures.
 func (e *Engine) ChatCompletion(ctx context.Context, req *openai.ChatCompletionRequest) (*openai.ChatCompletionResponse, error) {
-	return dispatch(ctx, e, req, func(p provider.Provider, route Route, upstream *openai.ChatCompletionRequest) (*openai.ChatCompletionResponse, error) {
+	started := time.Now()
+	return dispatch(ctx, e, req, false, started, func(p provider.Provider, route Route, upstream *openai.ChatCompletionRequest) (*openai.ChatCompletionResponse, error) {
 		resp, err := p.ChatCompletion(ctx, upstream)
 		if err != nil {
 			return nil, err
 		}
-		e.recordUsage(route, usageOf(resp.Usage, upstream, resp.Choices))
+		e.recordUsage(route, usageOf(resp.Usage, upstream, resp.Choices), false, started)
 		return resp, nil
 	})
 }
@@ -159,18 +239,21 @@ func (e *Engine) ChatCompletion(ctx context.Context, req *openai.ChatCompletionR
 // only while establishing the stream: once the channel is handed back the first
 // chunk may already be in flight, so the response is committed.
 func (e *Engine) ChatCompletionStream(ctx context.Context, req *openai.ChatCompletionRequest) (<-chan openai.StreamChunk, error) {
-	return dispatch(ctx, e, req, func(p provider.Provider, route Route, upstream *openai.ChatCompletionRequest) (<-chan openai.StreamChunk, error) {
+	started := time.Now()
+	return dispatch(ctx, e, req, true, started, func(p provider.Provider, route Route, upstream *openai.ChatCompletionRequest) (<-chan openai.StreamChunk, error) {
 		chunks, err := p.ChatCompletionStream(ctx, upstream)
 		if err != nil {
 			return nil, err
 		}
-		return e.meterStream(route, upstream, chunks), nil
+		return e.meterStream(ctx, route, upstream, chunks, started), nil
 	})
 }
 
 // dispatch walks the fallback chain for req.Model, retrying each provider
 // according to the engine policy, and returns the first successful result.
-func dispatch[T any](ctx context.Context, e *Engine, req *openai.ChatCompletionRequest, call func(provider.Provider, Route, *openai.ChatCompletionRequest) (T, error)) (T, error) {
+// A request that fails after reaching at least one provider is appended to the
+// usage log with its failure class so totals count every hit on a model.
+func dispatch[T any](ctx context.Context, e *Engine, req *openai.ChatCompletionRequest, streamed bool, started time.Time, call func(provider.Provider, Route, *openai.ChatCompletionRequest) (T, error)) (T, error) {
 	var zero T
 
 	// Pin one snapshot for the whole walk: a reload mid-chain must not move
@@ -178,15 +261,18 @@ func dispatch[T any](ctx context.Context, e *Engine, req *openai.ChatCompletionR
 	rt := e.routes.Load()
 	chain := rt.chain(req.Model)
 	var lastErr error
+	var lastRoute Route
+	attempted := false
 
-	for i, alias := range chain {
+	for _, alias := range chain {
 		p, route, err := rt.pick(alias)
 		if err != nil {
-			if i == 0 {
-				// The requested alias itself is unroutable: terminal.
+			if alias == req.Model {
+				// The requested alias itself is unroutable: terminal. A combo
+				// never matches here, so its members are all skippable.
 				return zero, err
 			}
-			e.logger.Warn("skipping unroutable fallback",
+			e.logger.Warn("skipping unroutable route",
 				slog.String("requested", req.Model),
 				slog.String("alias", alias),
 				slog.Any("error", err))
@@ -197,6 +283,8 @@ func dispatch[T any](ctx context.Context, e *Engine, req *openai.ChatCompletionR
 		upstream := *req
 		upstream.Model = route.Model
 
+		lastRoute, attempted = route, true
+
 		result, err := attempt(ctx, e, route, func() (T, error) { return call(p, route, &upstream) })
 		if err == nil {
 			return result, nil
@@ -204,15 +292,20 @@ func dispatch[T any](ctx context.Context, e *Engine, req *openai.ChatCompletionR
 		lastErr = err
 
 		if !provider.Retryable(err) {
+			e.recordFailure(route, streamed, classify(err), started)
 			return zero, err
 		}
 		if ctx.Err() != nil {
+			e.recordFailure(route, streamed, classify(ctx.Err()), started)
 			return zero, ctx.Err()
 		}
 	}
 
 	if lastErr == nil {
 		return zero, fmt.Errorf("%w: %s", ErrUnknownModel, req.Model)
+	}
+	if attempted {
+		e.recordFailure(lastRoute, streamed, classify(lastErr), started)
 	}
 	return zero, fmt.Errorf("%w: %w", ErrChainExhausted, lastErr)
 }

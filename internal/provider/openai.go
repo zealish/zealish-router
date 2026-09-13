@@ -8,12 +8,13 @@ type Options struct {
 	BaseURL    string
 	APIKey     string
 	HTTPClient *http.Client
-	// Referer and Title are OpenRouter attribution headers; ignored elsewhere.
-	Referer string
-	Title   string
+	// AuthHeader overrides the default "Authorization: Bearer <key>" credential
+	// header. Anthropic-compatible upstreams use "x-api-key" for API keys and
+	// keep the bearer form for OAuth tokens.
+	AuthHeader string
 }
 
-// OpenAI talks to the official OpenAI API.
+// OpenAI talks to any OpenAI-compatible upstream.
 type OpenAI struct {
 	httpProvider
 }

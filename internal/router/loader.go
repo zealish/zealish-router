@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/zealish/zealish-router/internal/provider"
 	"github.com/zealish/zealish-router/internal/storage"
@@ -15,15 +16,17 @@ import (
 type Loader struct {
 	providers storage.ProviderStore
 	models    storage.ModelStore
+	combos    storage.ComboStore
+	proxies   storage.ProxyStore
 	engine    *Engine
 }
 
 // NewLoader wires a loader onto an engine.
-func NewLoader(providers storage.ProviderStore, models storage.ModelStore, engine *Engine) *Loader {
-	return &Loader{providers: providers, models: models, engine: engine}
+func NewLoader(providers storage.ProviderStore, models storage.ModelStore, combos storage.ComboStore, proxies storage.ProxyStore, engine *Engine) *Loader {
+	return &Loader{providers: providers, models: models, combos: combos, proxies: proxies, engine: engine}
 }
 
-// Load reads providers and aliases and installs a fresh routing table.
+// Load reads providers, aliases and combos and installs a fresh routing table.
 func (l *Loader) Load(ctx context.Context) error {
 	providers, err := l.providers.List(ctx)
 	if err != nil {
@@ -33,34 +36,65 @@ func (l *Loader) Load(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("router: load model aliases: %w", err)
 	}
+	combos, err := l.combos.List(ctx)
+	if err != nil {
+		return fmt.Errorf("router: load combos: %w", err)
+	}
+	proxies, err := l.proxies.List(ctx)
+	if err != nil {
+		return fmt.Errorf("router: load proxies: %w", err)
+	}
 
-	l.engine.Reload(aliases, buildRegistry(providers))
+	l.engine.Reload(aliases, combos, buildRegistry(providers, NewProxyPool(proxies)))
 	return nil
 }
 
-// buildRegistry instantiates one provider client per enabled record. Kind
-// selects the wire dialect; an unknown kind falls back to plain OpenAI, which
-// every compatible upstream speaks.
-func buildRegistry(records []storage.Provider) *provider.Registry {
+// buildRegistry instantiates one provider client per enabled record.
+func buildRegistry(records []storage.Provider, pool *ProxyPool) *provider.Registry {
 	clients := make([]provider.Provider, 0, len(records))
 	for _, rec := range records {
 		if !rec.Enabled {
 			continue
 		}
-		opts := provider.Options{
-			Name:       rec.Name,
-			BaseURL:    rec.BaseURL,
-			APIKey:     rec.APIKey,
-			HTTPClient: &http.Client{Timeout: rec.Timeout},
-		}
-		switch rec.Kind {
-		case "openrouter":
-			clients = append(clients, provider.NewOpenRouter(opts))
-		case "ollama":
-			clients = append(clients, provider.NewOllama(opts))
-		default:
-			clients = append(clients, provider.NewOpenAI(opts))
-		}
+		clients = append(clients, NewProviderClient(rec, pool))
 	}
 	return provider.NewRegistry(clients...)
+}
+
+// NewProviderClient instantiates a provider client for a stored record. Kind
+// selects the wire dialect; an unknown kind falls back to plain OpenAI, which
+// every compatible upstream speaks. The group decides how the credential is
+// presented: OAuth tokens are always bearer tokens, whatever the dialect.
+func NewProviderClient(rec storage.Provider, pool *ProxyPool) provider.Provider {
+	client := &http.Client{Timeout: rec.Timeout}
+	// Providers opted into the proxy pool get a transport that rotates across
+	// the enabled proxies; everyone else keeps the default direct transport.
+	if rec.UseProxyPool {
+		if transport := pool.transport(); transport != nil {
+			client.Transport = transport
+		}
+	}
+	opts := provider.Options{
+		Name:       rec.Name,
+		BaseURL:    rec.BaseURL,
+		APIKey:     rec.APIKey,
+		HTTPClient: client,
+	}
+	if rec.Group == string(provider.GroupOAuth) {
+		opts.AuthHeader = "Authorization"
+		opts.APIKey = bearer(rec.APIKey)
+	}
+	if provider.NormalizeKind(rec.Kind) == provider.KindAnthropic {
+		return provider.NewAnthropic(opts)
+	}
+	return provider.NewOpenAI(opts)
+}
+
+// bearer prefixes a raw OAuth token, tolerating a token stored with the scheme
+// already attached.
+func bearer(token string) string {
+	if token == "" || strings.HasPrefix(token, "Bearer ") {
+		return token
+	}
+	return "Bearer " + token
 }

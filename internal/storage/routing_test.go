@@ -185,3 +185,65 @@ func TestMemoryRoutingStores(t *testing.T) {
 		t.Errorf("Get unknown alias: err = %v, want ErrNotFound", err)
 	}
 }
+
+// Deleting a provider must leave nothing behind that points at it.
+func TestProviderDeleteCascades(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		store func(t *testing.T) Store
+	}{
+		{"sqlite", func(t *testing.T) Store { return newTestStore(t) }},
+		{"memory", func(*testing.T) Store { return NewMemory() }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := tc.store(t)
+
+			for _, name := range []string{"openai", "groq"} {
+				if err := store.Providers().Put(ctx, sampleProvider(name)); err != nil {
+					t.Fatalf("Put provider %s: %v", name, err)
+				}
+			}
+			aliases := []ModelAlias{
+				{Alias: "gpt-5", Provider: "openai", Model: "m"},
+				{Alias: "groq-fast", Provider: "groq", Model: "m", Fallback: []string{"gpt-5", "groq-slow"}},
+				{Alias: "groq-slow", Provider: "groq", Model: "m"},
+			}
+			for _, a := range aliases {
+				if err := store.Models().Put(ctx, a); err != nil {
+					t.Fatalf("Put alias %s: %v", a.Alias, err)
+				}
+			}
+			for _, provider := range []string{"openai", "groq"} {
+				if err := store.Usage().Record(ctx, UsageEvent{
+					CreatedAt: time.Now(), Alias: "a", Provider: provider, Model: "m", Status: "ok",
+				}); err != nil {
+					t.Fatalf("Record usage %s: %v", provider, err)
+				}
+			}
+
+			if err := store.Providers().Delete(ctx, "openai"); err != nil {
+				t.Fatalf("Delete: %v", err)
+			}
+
+			if _, err := store.Models().Get(ctx, "gpt-5"); !errors.Is(err, ErrNotFound) {
+				t.Errorf("alias gpt-5: err = %v, want ErrNotFound", err)
+			}
+			remaining, err := store.Models().Get(ctx, "groq-fast")
+			if err != nil {
+				t.Fatalf("Get groq-fast: %v", err)
+			}
+			if len(remaining.Fallback) != 1 || remaining.Fallback[0] != "groq-slow" {
+				t.Errorf("fallback = %v, want [groq-slow]", remaining.Fallback)
+			}
+
+			events, err := store.Usage().Recent(ctx, 10)
+			if err != nil {
+				t.Fatalf("Recent: %v", err)
+			}
+			if len(events) != 1 || events[0].Provider != "groq" {
+				t.Errorf("usage = %+v, want only the groq event", events)
+			}
+		})
+	}
+}

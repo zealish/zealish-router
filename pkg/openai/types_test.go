@@ -66,3 +66,65 @@ func TestStreamOptionsOmittedWhenAbsent(t *testing.T) {
 		t.Fatalf("stream_options must be omitted when unset: %s", out)
 	}
 }
+
+func TestRequestPreservesUnmodelledFields(t *testing.T) {
+	raw := `{"model":"gpt-5","messages":[],` +
+		`"tools":[{"type":"function","function":{"name":"read_file"}}],` +
+		`"tool_choice":"auto","parallel_tool_calls":false,` +
+		`"response_format":{"type":"json_object"}}`
+
+	var req ChatCompletionRequest
+	if err := json.Unmarshal([]byte(raw), &req); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	out, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, want := range []string{`"read_file"`, `"tool_choice":"auto"`, `"parallel_tool_calls":false`, `"type":"json_object"`} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("dropped %s from request: %s", want, out)
+		}
+	}
+}
+
+func TestDeclaredFieldsWinOverExtras(t *testing.T) {
+	var req ChatCompletionRequest
+	if err := json.Unmarshal([]byte(`{"model":"alias","stream":true}`), &req); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	// The router rewrites the alias to the upstream model name; the extras
+	// merge must never resurrect the original value.
+	req.Model = "gpt-5"
+
+	out, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(out), `"alias"`) {
+		t.Fatalf("extras shadowed a rewritten field: %s", out)
+	}
+}
+
+func TestStreamChunkPreservesToolCallDeltas(t *testing.T) {
+	raw := `{"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,` +
+		`"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1",` +
+		`"function":{"name":"read_file","arguments":"{\"p\":1}"}}]},` +
+		`"finish_reason":null,"logprobs":null}],"system_fingerprint":"fp_1"}`
+
+	var chunk StreamChunk
+	if err := json.Unmarshal([]byte(raw), &chunk); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	out, err := json.Marshal(chunk)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, want := range []string{`"tool_calls"`, `"call_1"`, `"read_file"`, `"system_fingerprint":"fp_1"`} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("dropped %s from chunk: %s", want, out)
+		}
+	}
+}

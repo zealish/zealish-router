@@ -39,6 +39,10 @@ func newHTTPProvider(opts Options, headers map[string]string) httpProvider {
 // Name implements Provider.
 func (p *httpProvider) Name() string { return p.opts.Name }
 
+// Client exposes the underlying HTTP client, so callers can verify transport
+// configuration such as proxy routing.
+func (p *httpProvider) Client() *http.Client { return p.opts.HTTPClient }
+
 // ChatCompletion performs a non-streaming completion against the upstream.
 func (p *httpProvider) ChatCompletion(ctx context.Context, req *openai.ChatCompletionRequest) (*openai.ChatCompletionResponse, error) {
 	body := *req
@@ -85,16 +89,7 @@ func (p *httpProvider) ChatCompletionStream(ctx context.Context, req *openai.Cha
 
 // pump parses the upstream SSE byte stream and forwards decoded chunks.
 func (p *httpProvider) pump(ctx context.Context, body io.Reader, out chan<- openai.StreamChunk) {
-	scanner := bufio.NewScanner(body)
-	scanner.Buffer(make([]byte, 0, 64<<10), 1<<20)
-
-	var data strings.Builder
-	flush := func() bool {
-		defer data.Reset()
-		payload := data.String()
-		if payload == "" {
-			return true
-		}
+	scanSSE(body, func(_, payload string) bool {
 		if payload == doneSentinel {
 			return false
 		}
@@ -108,6 +103,29 @@ func (p *httpProvider) pump(ctx context.Context, body io.Reader, out chan<- open
 		case <-ctx.Done():
 			return false
 		}
+	})
+}
+
+// scanSSE parses a Server-Sent Events stream and invokes fn once per event
+// with its name (empty when unnamed) and its concatenated data payload.
+// Scanning stops when fn returns false or the stream ends.
+func scanSSE(body io.Reader, fn func(event, data string) bool) {
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 0, 64<<10), 1<<20)
+
+	var (
+		data  strings.Builder
+		event string
+	)
+	flush := func() bool {
+		defer func() {
+			data.Reset()
+			event = ""
+		}()
+		if data.Len() == 0 {
+			return true
+		}
+		return fn(event, data.String())
 	}
 
 	for scanner.Scan() {
@@ -122,26 +140,34 @@ func (p *httpProvider) pump(ctx context.Context, body io.Reader, out chan<- open
 			continue
 		}
 		field, value, _ := strings.Cut(line, ":")
-		if field != "data" {
-			continue
+		value = strings.TrimPrefix(value, " ")
+		switch field {
+		case "event":
+			event = value
+		case "data":
+			if data.Len() > 0 {
+				data.WriteByte('\n')
+			}
+			data.WriteString(value)
 		}
-		if data.Len() > 0 {
-			data.WriteByte('\n')
-		}
-		data.WriteString(strings.TrimPrefix(value, " "))
 	}
 	flush()
 }
 
-// post sends the request body and returns a response whose status is 2xx. Any
-// other status is converted into a classified *Error and the body is closed.
+// post sends an OpenAI-format body to the upstream's chat/completions path.
 func (p *httpProvider) post(ctx context.Context, body *openai.ChatCompletionRequest, stream bool) (*http.Response, error) {
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return nil, &Error{Provider: p.opts.Name, Message: fmt.Sprintf("encode request: %v", err)}
 	}
+	return p.do(ctx, "chat/completions", payload, stream)
+}
 
-	endpoint, err := url.JoinPath(p.opts.BaseURL, "chat/completions")
+// do sends payload to {base_url}/{path} and returns a response whose status is
+// 2xx. Any other status is converted into a classified *Error and the body is
+// closed.
+func (p *httpProvider) do(ctx context.Context, path string, payload []byte, stream bool) (*http.Response, error) {
+	endpoint, err := url.JoinPath(p.opts.BaseURL, path)
 	if err != nil {
 		return nil, &Error{Provider: p.opts.Name, Message: fmt.Sprintf("invalid base_url: %v", err)}
 	}
@@ -156,12 +182,7 @@ func (p *httpProvider) post(ctx context.Context, body *openai.ChatCompletionRequ
 	} else {
 		httpReq.Header.Set("Accept", "application/json")
 	}
-	if p.opts.APIKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+p.opts.APIKey)
-	}
-	for k, v := range p.headers {
-		httpReq.Header.Set(k, v)
-	}
+	p.applyHeaders(httpReq)
 
 	resp, err := p.opts.HTTPClient.Do(httpReq)
 	if err != nil {
@@ -172,6 +193,22 @@ func (p *httpProvider) post(ctx context.Context, body *openai.ChatCompletionRequ
 		return nil, p.statusError(resp)
 	}
 	return resp, nil
+}
+
+// applyHeaders sets the credential and the provider's static headers. The auth
+// style differs per dialect: OpenAI-compatible upstreams take a bearer token,
+// Anthropic takes the key in x-api-key unless it is an OAuth token.
+func (p *httpProvider) applyHeaders(req *http.Request) {
+	if p.opts.APIKey != "" {
+		if p.opts.AuthHeader != "" {
+			req.Header.Set(p.opts.AuthHeader, p.opts.APIKey)
+		} else {
+			req.Header.Set("Authorization", "Bearer "+p.opts.APIKey)
+		}
+	}
+	for k, v := range p.headers {
+		req.Header.Set(k, v)
+	}
 }
 
 // transportError classifies a failure that occurred before a response arrived.
