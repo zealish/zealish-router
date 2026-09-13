@@ -1,0 +1,229 @@
+// Command server is the single-binary entrypoint of Zealish Router.
+// It wires every dependency explicitly and owns the process lifecycle.
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+	"text/tabwriter"
+	"time"
+
+	"github.com/zealish/zealish-router/internal/api"
+	"github.com/zealish/zealish-router/internal/auth"
+	"github.com/zealish/zealish-router/internal/config"
+	"github.com/zealish/zealish-router/internal/metrics"
+	"github.com/zealish/zealish-router/internal/router"
+	"github.com/zealish/zealish-router/internal/storage"
+)
+
+func main() {
+	if err := run(os.Args[1:]); err != nil {
+		fmt.Fprintf(os.Stderr, "zealish-router: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func run(args []string) error {
+	fs := flag.NewFlagSet("zealish-router", flag.ContinueOnError)
+	configPath := fs.String("config", "config.yaml", "path to the configuration file")
+	logLevel := fs.String("log-level", "info", "log level: debug, info, warn, error")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		return err
+	}
+
+	rest := fs.Args()
+	command := "serve"
+	if len(rest) > 0 {
+		command = rest[0]
+		rest = rest[1:]
+	}
+
+	logger := newLogger(*logLevel)
+
+	switch command {
+	case "serve":
+		return serve(cfg, *configPath, logger)
+	case "validate":
+		logger.Info("configuration is valid", slog.String("path", *configPath))
+		return nil
+	case "keys":
+		return keysCommand(cfg, rest)
+	case "models":
+		return modelsCommand(cfg)
+	default:
+		return fmt.Errorf("unknown command %q", command)
+	}
+}
+
+// keysCommand implements `keys create|list|revoke`.
+func keysCommand(cfg *config.Config, args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: keys create --name <name> | keys list | keys revoke <id>")
+	}
+
+	ctx := context.Background()
+	store, err := storage.OpenSQLite(ctx, cfg.Database.Path)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = store.Close() }()
+	keys := store.APIKeys()
+
+	switch args[0] {
+	case "create":
+		fs := flag.NewFlagSet("keys create", flag.ContinueOnError)
+		name := fs.String("name", "", "human-readable label for the key")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *name == "" {
+			return errors.New("keys create: --name is required")
+		}
+
+		generated, err := auth.GenerateKey(*name)
+		if err != nil {
+			return err
+		}
+		if err := keys.Create(ctx, generated.Record); err != nil {
+			return err
+		}
+		// The raw key is unrecoverable after this line: only its hash is stored.
+		fmt.Printf("id:  %s\nkey: %s\n\nStore this key now; it cannot be shown again.\n",
+			generated.Record.ID, generated.Raw)
+		return nil
+
+	case "list":
+		records, err := keys.List(ctx)
+		if err != nil {
+			return err
+		}
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(w, "ID\tNAME\tENABLED\tCREATED\tLAST USED")
+		for _, k := range records {
+			lastUsed := "never"
+			if !k.LastUsedAt.IsZero() {
+				lastUsed = k.LastUsedAt.Format(time.RFC3339)
+			}
+			fmt.Fprintf(w, "%s\t%s\t%t\t%s\t%s\n",
+				k.ID, k.Name, k.Enabled, k.CreatedAt.Format(time.RFC3339), lastUsed)
+		}
+		return w.Flush()
+
+	case "revoke":
+		if len(args) < 2 {
+			return errors.New("usage: keys revoke <id>")
+		}
+		if err := keys.Delete(ctx, args[1]); err != nil {
+			return err
+		}
+		fmt.Printf("revoked %s\n", args[1])
+		return nil
+
+	default:
+		return fmt.Errorf("unknown keys subcommand %q", args[0])
+	}
+}
+
+// modelsCommand prints the stored alias routing table.
+func modelsCommand(cfg *config.Config) error {
+	ctx := context.Background()
+	store, err := storage.OpenSQLite(ctx, cfg.Database.Path)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = store.Close() }()
+
+	aliases, err := store.Models().List(ctx)
+	if err != nil {
+		return err
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "ALIAS\tPROVIDER\tMODEL\tFALLBACK")
+	for _, m := range aliases {
+		fallback := "-"
+		if len(m.Fallback) > 0 {
+			fallback = strings.Join(m.Fallback, " → ")
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", m.Alias, m.Provider, m.Model, fallback)
+	}
+	return w.Flush()
+}
+
+func serve(cfg *config.Config, configPath string, logger *slog.Logger) error {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	store, err := storage.OpenSQLite(ctx, cfg.Database.Path)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = store.Close() }()
+	logger.Info("database ready", slog.String("path", cfg.Database.Path))
+
+	collector := metrics.New()
+	engine := router.NewEngine(logger, collector)
+	loader := router.NewLoader(store.Providers(), store.Models(), engine)
+	if err := loader.Load(ctx); err != nil {
+		return err
+	}
+
+	authenticator := auth.NewService(cfg.Auth.Enabled, cfg.Auth.APIKeys, store.APIKeys(), logger)
+	adminAuth := auth.NewAdminService(cfg.Admin.Enabled, cfg.Admin.Token)
+
+	server := api.NewServer(api.Dependencies{
+		Config:    cfg,
+		Engine:    engine,
+		Loader:    loader,
+		Store:     store,
+		Auth:      authenticator,
+		AdminAuth: adminAuth,
+		Metrics:   collector,
+		Logger:    logger,
+	})
+
+	// Routing lives in the database, so a configuration reload only refreshes
+	// the credentials the YAML still owns. Listener and database settings are
+	// fixed for the lifetime of the process.
+	go func() {
+		err := config.Watch(ctx, configPath, logger, func(next *config.Config) {
+			authenticator.SetStaticKeys(next.Auth.APIKeys)
+			adminAuth.SetToken(next.Admin.Token)
+			logger.Info("configuration reloaded")
+		})
+		if err != nil {
+			logger.Error("config watcher stopped", slog.Any("error", err))
+		}
+	}()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- server.Start() }()
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		logger.Info("shutdown signal received")
+		return server.Shutdown(context.Background())
+	}
+}
+
+func newLogger(level string) *slog.Logger {
+	var lvl slog.Level
+	if err := lvl.UnmarshalText([]byte(level)); err != nil {
+		lvl = slog.LevelInfo
+	}
+	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lvl}))
+}

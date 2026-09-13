@@ -1,0 +1,22 @@
+# Process-level configuration only. Providers and model aliases live in the
+# database and are managed through the admin API at /api/v1.
+server:
+  host: 0.0.0.0
+  port: 8787
+  read_timeout: 30s
+  write_timeout: 0s
+  shutdown_timeout: 15s
+
+database:
+  path: data/router.db
+
+auth:
+  enabled: true
+  api_keys:
+    - zr_local_dev
+
+admin:
+  enabled: true
+  token: change-me
+  cors_origins:
+    - http://localhost:3000
