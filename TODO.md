@@ -178,11 +178,13 @@ Legend: `[x]` done · `[ ]` pending · `~` partial (scaffold only, no logic)
 
 ## v1.0 — Dashboard, Packaging, Release
 
-### Dashboard (`apps/dashboard`)
-- [ ] Next.js 16 + React 19 + Tailwind v4 + shadcn/ui scaffold
-- [ ] Pages: Overview, Models, Providers, API Keys, Settings
-- [ ] TanStack Table for lists, Recharts for overview
-- [ ] Confirm no model traffic passes through Next.js (PRD §16)
+### Dashboard (`apps/dashboard`) ✅
+- [x] Next.js 16 + React 19 + Tailwind v4 + shadcn/ui scaffold
+- [x] Pages: Overview, Models, Providers, API Keys, Settings
+- [x] TanStack Table for lists (pinned to v8 — v9 replaces `useReactTable` with a different `useTable` API), Recharts area chart on Overview
+- [x] Admin token held in `localStorage` and sent as `Authorization: Bearer`, never baked into the build; `NEXT_PUBLIC_ROUTER_URL` points at the router
+- [x] Confirm no model traffic passes through Next.js (PRD §16) — the client only calls `/api/v1`, `/v1` is never touched
+- [x] `next build` and `eslint` clean; CRUD verified end to end against a running router
 
 ### Packaging ✅
 - [x] Multi-stage Dockerfile, distroless nonroot
@@ -203,7 +205,7 @@ Legend: `[x]` done · `[ ]` pending · `~` partial (scaffold only, no logic)
 - [x] `LICENSE` — Apache-2.0 (PRD header)
 - [x] `README.md` — quickstart, config reference, coding-agent setup examples
 - [x] `.gitignore` — `bin/`, `data/`, `.env`
-- [x] `.github/workflows/ci.yml` — gofmt, vet, build, `test -race`, golangci-lint
+- [x] `.github/workflows/ci.yml` — gofmt, vet, build, `test -race`, golangci-lint, dashboard `eslint` + `next build`
 - [x] `.github/workflows/release.yml` — on `v*` tags: goreleaser binaries + multi-arch image pushed to GHCR
 - [x] `.golangci.yml` — errcheck, errorlint, revive, staticcheck, bodyclose, noctx; repo is lint-clean
 - [x] `CONTRIBUTING.md` — local workflow, required checks, layout, conventions, how to add a provider
@@ -224,4 +226,9 @@ Legend: `[x]` done · `[ ]` pending · `~` partial (scaffold only, no logic)
 
 ## Next Action
 
-**v1.0 — dashboard is all that is left.** Backend, hardening, CI, packaging and repo hygiene are done: the repo is lint-clean, tested under `-race`, ships multi-arch images and static tarballs, a compose file and a hardened systemd unit. Remaining for the release: the Next.js dashboard in `apps/dashboard` (Overview, Models, Providers, API Keys, Settings) consuming `/api/v1`, then tagging. Per-key rate limiting is deferred to post-1.0.
+**v1.0 is feature-complete — tagging is all that is left.** Backend, dashboard,
+hardening, CI, packaging and repo hygiene are done: the repo is lint-clean,
+tested under `-race`, ships multi-arch images and static tarballs, a compose
+file and a hardened systemd unit, plus the Next.js dashboard in
+`apps/dashboard`, and CI lints and builds it. Remaining: tag `v1.0.0`. Per-key
+rate limiting is deferred to post-1.0.

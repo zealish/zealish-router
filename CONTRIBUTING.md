@@ -30,6 +30,22 @@ CI runs the same checks. A pull request that fails `gofmt`, `go vet`,
 `golangci-lint` is not vendored; install it separately or run it through
 `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest run ./...`.
 
+## Dashboard
+
+`apps/dashboard` is a separate Next.js app requiring Node 24. It talks only to
+the admin API at `/api/v1`; no model traffic passes through it.
+
+```sh
+cd apps/dashboard
+npm install
+npm run dev      # http://localhost:3000, expects the router on :8787
+npx eslint .     # both run in CI
+npm run build
+```
+
+`PROVIDER_KINDS` in `src/lib/api.ts` mirrors the kinds registered in
+`internal/router/loader.go` — extend both when adding a provider.
+
 ## Project layout
 
 ```
@@ -43,6 +59,7 @@ internal/auth     key hashing, generation, authentication
 internal/config   YAML loading, validation, live reload
 internal/metrics  private Prometheus registry
 pkg/openai        OpenAI wire types
+apps/dashboard    Next.js dashboard (Overview, Models, Providers, Keys, Settings)
 ```
 
 Dependencies point inward. `internal/config` imports nothing from the project;
@@ -73,6 +90,8 @@ global state, including the Prometheus registry.
    `internal/router/loader.go`. An unknown kind falls back to plain OpenAI.
 3. Add a test that covers the non-streaming path, the streaming path and error
    mapping, following `internal/provider/http_test.go`.
+4. Add the kind to `PROVIDER_KINDS` in `apps/dashboard/src/lib/api.ts` so it is
+   selectable in the dashboard.
 
 ## Database changes
 

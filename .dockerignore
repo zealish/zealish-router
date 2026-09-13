@@ -1,0 +1,9 @@
+.git
+.github
+apps
+bin
+data
+docker
+packaging
+*.md
+.env

@@ -189,6 +189,25 @@ Every mutation republishes the routing table in place — no restart needed.
 
 ---
 
+## Dashboard
+
+A separate Next.js app in `apps/dashboard` — Overview, Models, Providers, API
+Keys and Settings — talking only to `/api/v1`. No model traffic passes through
+it.
+
+```sh
+cd apps/dashboard
+cp .env.example .env.local     # NEXT_PUBLIC_ROUTER_URL, defaults to :8787
+npm install
+npm run dev                    # http://localhost:3000
+```
+
+The router must have `admin.enabled: true` and list the dashboard origin under
+`admin.cors_origins`. The admin token is entered in the browser and kept in
+`localStorage`; it is never baked into the build.
+
+---
+
 ## Routing and fallback
 
 A model alias names a primary provider plus an ordered fallback chain. On a
@@ -293,6 +312,7 @@ internal/auth     key hashing, generation, authentication
 internal/config   YAML loading, validation, live reload
 internal/metrics  private Prometheus registry
 pkg/openai        OpenAI wire types
+apps/dashboard    Next.js dashboard (Overview, Models, Providers, Keys, Settings)
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution workflow, `PRD.md`

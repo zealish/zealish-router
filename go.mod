@@ -2,6 +2,9 @@ module github.com/zealish/zealish-router
 
 go 1.25.0
 
+// The dashboard is a Node project; keep its vendored tree out of ./... walks.
+ignore ./apps/dashboard
+
 require (
 	github.com/go-chi/chi/v5 v5.2.2
 	github.com/prometheus/client_golang v1.22.0
