@@ -13,11 +13,15 @@ database:
 
 auth:
   enabled: true
-  api_keys:
-    - zr_local_dev
+  # Static keys are optional and mainly useful for local development. Prefer
+  # `zealish-router keys create --name <name>`, which stores only the hash.
+  api_keys: []
 
+# The admin API is the dashboard's backend and can reconfigure routing, so it
+# ships disabled. Enable it with a token you generate yourself — anything
+# predictable here is a remote configuration hole.
 admin:
-  enabled: true
-  token: change-me
+  enabled: false
+  token: ""
   cors_origins:
     - http://localhost:3000

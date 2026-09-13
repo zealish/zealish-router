@@ -51,8 +51,22 @@ Configure them through the admin API:
 
 ```sh
 ADMIN=http://localhost:8787/api/v1
-TOKEN=change-me   # admin.token from config.yaml
+TOKEN=$(openssl rand -hex 32)
+```
 
+The admin API ships **disabled** so a default deployment exposes no
+configuration surface. Enable it in `config.yaml` with the token you just
+generated, then restart:
+
+```yaml
+admin:
+  enabled: true
+  token: <your token>
+```
+
+Then configure providers and aliases:
+
+```sh
 curl -X PUT $ADMIN/providers/openai \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"kind":"openai","base_url":"https://api.openai.com/v1","api_key":"sk-…","timeout_ms":60000,"enabled":true}'
@@ -126,12 +140,12 @@ database:
 
 auth:
   enabled: true
-  api_keys:                # static keys, in addition to database-backed keys
-    - zr_local_dev
+  api_keys: []             # static keys, in addition to database-backed keys
 
 admin:
-  enabled: true            # false unmounts /api/v1 entirely
-  token: change-me
+  enabled: false           # false unmounts /api/v1 entirely
+  token: ""                # generate your own; validation rejects an empty
+                           # token while admin.enabled is true
   cors_origins:
     - http://localhost:3000
 ```
@@ -143,7 +157,8 @@ admin:
 | `database.path` | SQLite file; parent directories are created on demand. |
 | `auth.enabled` | `false` disables gateway authentication entirely. |
 | `auth.api_keys` | Static keys compared in constant time; useful for local dev. |
-| `admin.token` | Bearer token for `/api/v1`. Empty means the admin API fails closed. |
+| `admin.enabled` | Ships `false`, so a default deployment exposes no configuration surface. |
+| `admin.token` | Bearer token for `/api/v1`. Required once `admin.enabled` is true. |
 | `admin.cors_origins` | Exact origins echoed back; wildcards are never sent. |
 
 ---
