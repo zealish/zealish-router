@@ -98,8 +98,10 @@ func TestBreakerProbeSuccessCloses(t *testing.T) {
 	if health.Failures != 0 {
 		t.Errorf("failures = %d, want 0", health.Failures)
 	}
-	if !b.allow("openai") || !b.allow("openai") {
-		t.Error("closed circuit rejected a request")
+	for i := range 2 {
+		if !b.allow("openai") {
+			t.Errorf("closed circuit rejected request %d", i)
+		}
 	}
 }
 

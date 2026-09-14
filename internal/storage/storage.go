@@ -209,6 +209,7 @@ type KeyUsage struct {
 // LeaderboardSort selects the metric a usage leaderboard is ranked by.
 type LeaderboardSort string
 
+// The metrics a leaderboard can be ranked by.
 const (
 	LeaderboardByRequests LeaderboardSort = "requests"
 	LeaderboardByTokens   LeaderboardSort = "tokens"
