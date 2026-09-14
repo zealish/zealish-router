@@ -146,7 +146,7 @@ export default function KeysPage() {
       ),
       cell: ({ row }) => (
         <span className="tabular-nums">
-          {row.original.requests.toLocaleString()}
+          {(row.original.requests ?? 0).toLocaleString()}
         </span>
       ),
     },
@@ -161,13 +161,13 @@ export default function KeysPage() {
     },
     {
       id: "budget",
-      accessorFn: (key) => key.month_spend_usd,
+      accessorFn: (key) => key.month_spend_usd ?? 0,
       header: ({ column }) => (
         <DataTableColumnHeader column={column} title="This month" />
       ),
       cell: ({ row }) => {
-        const { month_spend_usd: spent, monthly_budget_usd: budget } =
-          row.original;
+        const spent = row.original.month_spend_usd ?? 0;
+        const budget = row.original.monthly_budget_usd ?? 0;
         if (!budget) {
           return <span className="tabular-nums">{formatCost(spent)}</span>;
         }
@@ -377,8 +377,8 @@ export default function KeysPage() {
 }
 
 /** Sub-cent costs need more precision than a currency formatter gives. */
-function formatCost(usd: number): string {
-  if (usd === 0) return "$0.00";
+function formatCost(usd: number | undefined): string {
+  if (!usd) return "$0.00";
   if (usd < 0.01) return `$${usd.toFixed(4)}`;
   return `$${usd.toFixed(2)}`;
 }
