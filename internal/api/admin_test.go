@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -8,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zealish/zealish-router/internal/auth"
 	"github.com/zealish/zealish-router/internal/config"
@@ -402,6 +404,42 @@ func TestAdminOverviewCountsResources(t *testing.T) {
 	// Every admin call above was instrumented, so requests must be non-zero.
 	if overview.Requests == 0 {
 		t.Error("overview reported zero requests")
+	}
+}
+
+func TestAdminOverviewHoursWindowFiltersTotals(t *testing.T) {
+	h, store, _ := newAdminServer(t)
+	ctx := context.Background()
+
+	now := time.Now().UTC()
+	for _, at := range []time.Time{now.Add(-48 * time.Hour), now.Add(-30 * time.Minute)} {
+		if err := store.Usage().Record(ctx, storage.UsageEvent{
+			CreatedAt: at, Alias: "a", Provider: "openai", Model: "m", Status: "ok",
+			PromptTokens: 10, CompletionTokens: 5, CostUSD: 0.01,
+		}); err != nil {
+			t.Fatalf("record usage: %v", err)
+		}
+	}
+
+	lifetime := decodeJSON[overviewResponse](t, adminRequest(t, h, http.MethodGet, "/api/v1/overview", ""))
+	if lifetime.TotalRequests != 2 {
+		t.Errorf("lifetime total_requests = %d, want 2", lifetime.TotalRequests)
+	}
+
+	windowed := decodeJSON[overviewResponse](t, adminRequest(t, h, http.MethodGet, "/api/v1/overview?hours=1", ""))
+	if windowed.TotalRequests != 1 {
+		t.Errorf("hours=1 total_requests = %d, want 1", windowed.TotalRequests)
+	}
+	if windowed.PromptTokens != 10 || windowed.CompletionTokens != 5 {
+		t.Errorf("hours=1 tokens = %d/%d, want 10/5", windowed.PromptTokens, windowed.CompletionTokens)
+	}
+
+	// A malformed or non-positive window falls back to lifetime totals.
+	for _, raw := range []string{"nope", "0", "-3"} {
+		got := decodeJSON[overviewResponse](t, adminRequest(t, h, http.MethodGet, "/api/v1/overview?hours="+raw, ""))
+		if got.TotalRequests != 2 {
+			t.Errorf("hours=%s total_requests = %d, want 2 (lifetime)", raw, got.TotalRequests)
+		}
 	}
 }
 

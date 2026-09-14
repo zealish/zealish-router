@@ -208,7 +208,7 @@ version                      print the build version
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/v1/overview` | Lifetime totals from the usage log plus live counters and resource counts |
+| `GET` | `/api/v1/overview` | Usage totals for a window (`?hours=`, default lifetime) plus live counters and resource counts |
 | `GET` | `/api/v1/usage` | Time-bucketed token/cost series for a window (`?hours=`) |
 | `GET` | `/api/v1/usage/recent` | Newest usage events (`?limit=`) |
 | `GET` `POST` `DELETE` | `/api/v1/keys[/{id}]` | Gateway keys; the raw key is returned only on create |

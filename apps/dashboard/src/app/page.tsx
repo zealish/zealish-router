@@ -164,9 +164,13 @@ const recentColumns: ColumnDef<UsageEvent, unknown>[] = [
 
 export default function OverviewPage() {
   const [hours, setHours] = useState(24);
+  const [statHours, setStatHours] = useState(0);
   const [lbHours, setLbHours] = useState(24);
   const [lbSort, setLbSort] = useState<LbSort>("requests");
-  const overview = useResource<Overview>("/overview", POLL_MS);
+  const overview = useResource<Overview>(
+    statHours ? `/overview?hours=${statHours}` : "/overview",
+    POLL_MS,
+  );
   const usage = useResource<UsageSummary>(`/usage?hours=${hours}`, POLL_MS);
   const recent = useResource<UsageEvent[]>("/usage/recent?limit=15", POLL_MS);
   const models = useResource<ModelUsage[]>("/usage/models", POLL_MS);
@@ -204,8 +208,28 @@ export default function OverviewPage() {
     <>
       <PageHeader
         title="Overview"
-        description="Lifetime totals and cost from the router's request log."
+        description="Usage totals and cost from the router's request log."
       />
+
+      <div className="mb-4 flex justify-end gap-1">
+        <Button
+          size="sm"
+          variant={statHours === 0 ? "default" : "outline"}
+          onClick={() => setStatHours(0)}
+        >
+          All
+        </Button>
+        {WINDOWS.map((w) => (
+          <Button
+            key={w.hours}
+            size="sm"
+            variant={statHours === w.hours ? "default" : "outline"}
+            onClick={() => setStatHours(w.hours)}
+          >
+            {w.label}
+          </Button>
+        ))}
+      </div>
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
         <Stat

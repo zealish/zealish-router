@@ -88,8 +88,9 @@ type overviewResponse struct {
 	Combos        int     `json:"combos"`
 	APIKeys       int     `json:"api_keys"`
 
-	// Usage totals are lifetime figures from the durable log, unlike the
-	// counters above which reset with the process.
+	// Usage totals cover the ?hours= window, or the whole durable log
+	// when the parameter is absent, unlike the counters above which
+	// reset with the process.
 	TotalRequests    int     `json:"total_requests"`
 	PromptTokens     int     `json:"prompt_tokens"`
 	CachedTokens     int     `json:"cached_tokens"`
@@ -135,8 +136,17 @@ func (h *adminHandler) overview(w http.ResponseWriter, r *http.Request) {
 		resp.ErrorRate = snapshot.RequestErrors / snapshot.Requests
 	}
 
-	// Lifetime totals: since the epoch, because the log is never pruned.
-	if totals, err := h.store.Usage().Totals(ctx, time.Time{}); err == nil {
+	// No ?hours= means lifetime: since the epoch, because the log is never pruned.
+	since := time.Time{}
+	if raw := r.URL.Query().Get("hours"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			if n > 24*90 {
+				n = 24 * 90
+			}
+			since = time.Now().Add(-time.Duration(n) * time.Hour)
+		}
+	}
+	if totals, err := h.store.Usage().Totals(ctx, since); err == nil {
 		resp.TotalRequests = totals.Requests
 		resp.PromptTokens = totals.PromptTokens
 		resp.CachedTokens = totals.CachedTokens
