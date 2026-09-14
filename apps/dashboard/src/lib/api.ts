@@ -149,6 +149,17 @@ export type UsageEvent = {
   cost_usd: number;
 };
 
+export type ModelUsage = {
+  alias: string;
+  requests: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cached_tokens: number;
+  total_tokens: number;
+  cost_usd: number;
+  last_used: string;
+};
+
 export type UsageBucket = {
   start: string;
   requests: number;

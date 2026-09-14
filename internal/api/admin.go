@@ -44,6 +44,8 @@ func (h *adminHandler) routes(r chi.Router) {
 	r.Get("/overview", h.overview)
 	r.Get("/usage", h.usageSummary)
 	r.Get("/usage/recent", h.usageRecent)
+	r.Get("/usage/models", h.usageByModel)
+	r.Get("/usage/leaderboard", h.usageLeaderboard)
 
 	r.Get("/keys", h.listKeys)
 	r.Post("/keys", h.createKey)
@@ -1179,6 +1181,83 @@ func (h *adminHandler) usageRecent(w http.ResponseWriter, r *http.Request) {
 			ReasoningTokens:  e.ReasoningTokens,
 			TotalTokens:      e.PromptTokens + e.CompletionTokens,
 			CostUSD:          e.CostUSD,
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+type modelUsageResponse struct {
+	Alias            string  `json:"alias"`
+	Requests         int     `json:"requests"`
+	PromptTokens     int     `json:"prompt_tokens"`
+	CompletionTokens int     `json:"completion_tokens"`
+	CachedTokens     int     `json:"cached_tokens"`
+	TotalTokens      int     `json:"total_tokens"`
+	CostUSD          float64 `json:"cost_usd"`
+	LastUsed         string  `json:"last_used"`
+}
+
+func (h *adminHandler) usageByModel(w http.ResponseWriter, r *http.Request) {
+	models, err := h.store.Usage().ByModel(r.Context())
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+
+	out := make([]modelUsageResponse, 0, len(models))
+	for _, m := range models {
+		out = append(out, modelUsageResponse{
+			Alias:            m.Alias,
+			Requests:         m.Requests,
+			PromptTokens:     m.PromptTokens,
+			CompletionTokens: m.CompletionTokens,
+			CachedTokens:     m.CachedTokens,
+			TotalTokens:      m.PromptTokens + m.CompletionTokens,
+			CostUSD:          m.CostUSD,
+			LastUsed:         m.LastUsed.Format(time.RFC3339),
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// usageLeaderboard ranks aliases inside the requested window. ?sort= picks the
+// ranking metric: requests (default), tokens, or cost.
+func (h *adminHandler) usageLeaderboard(w http.ResponseWriter, r *http.Request) {
+	window, _ := usageWindow(r)
+
+	limit := 10
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 && n <= 50 {
+			limit = n
+		}
+	}
+
+	sortBy := storage.LeaderboardByRequests
+	switch r.URL.Query().Get("sort") {
+	case "tokens":
+		sortBy = storage.LeaderboardByTokens
+	case "cost":
+		sortBy = storage.LeaderboardByCost
+	}
+
+	since := time.Now().Add(-window)
+	models, err := h.store.Usage().Leaderboard(r.Context(), since, limit, sortBy)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+
+	out := make([]modelUsageResponse, 0, len(models))
+	for _, m := range models {
+		out = append(out, modelUsageResponse{
+			Alias:            m.Alias,
+			Requests:         m.Requests,
+			PromptTokens:     m.PromptTokens,
+			CompletionTokens: m.CompletionTokens,
+			CachedTokens:     m.CachedTokens,
+			TotalTokens:      m.PromptTokens + m.CompletionTokens,
+			CostUSD:          m.CostUSD,
+			LastUsed:         m.LastUsed.Format(time.RFC3339),
 		})
 	}
 	writeJSON(w, http.StatusOK, out)

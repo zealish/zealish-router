@@ -884,6 +884,91 @@ func (s *sqliteUsage) Series(ctx context.Context, since time.Time, bucket time.D
 	return out, nil
 }
 
+func (s *sqliteUsage) ByModel(ctx context.Context) ([]ModelUsage, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT alias,
+		        COUNT(*),
+		        COALESCE(SUM(prompt_tokens), 0),
+		        COALESCE(SUM(completion_tokens), 0),
+		        COALESCE(SUM(cached_tokens), 0),
+		        COALESCE(SUM(cost_usd), 0),
+		        MAX(created_at)
+		 FROM usage_events
+		 GROUP BY alias
+		 ORDER BY MAX(created_at) DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("storage: usage by model: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []ModelUsage
+	for rows.Next() {
+		var (
+			m        ModelUsage
+			lastUsed int64
+		)
+		if err := rows.Scan(&m.Alias, &m.Requests, &m.PromptTokens,
+			&m.CompletionTokens, &m.CachedTokens, &m.CostUSD, &lastUsed); err != nil {
+			return nil, fmt.Errorf("storage: scan model usage: %w", err)
+		}
+		m.LastUsed = time.Unix(lastUsed, 0).UTC()
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("storage: usage by model: %w", err)
+	}
+	return out, nil
+}
+
+func (s *sqliteUsage) Leaderboard(ctx context.Context, since time.Time, limit int, sortBy LeaderboardSort) ([]ModelUsage, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	// Sort expression is chosen from a fixed set; never user input directly.
+	order := "COUNT(*) DESC"
+	switch sortBy {
+	case LeaderboardByTokens:
+		order = "COALESCE(SUM(prompt_tokens), 0) + COALESCE(SUM(completion_tokens), 0) DESC"
+	case LeaderboardByCost:
+		order = "COALESCE(SUM(cost_usd), 0) DESC"
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT alias,
+		        COUNT(*),
+		        COALESCE(SUM(prompt_tokens), 0),
+		        COALESCE(SUM(completion_tokens), 0),
+		        COALESCE(SUM(cached_tokens), 0),
+		        COALESCE(SUM(cost_usd), 0),
+		        MAX(created_at)
+		 FROM usage_events
+		 WHERE created_at >= ?
+		 GROUP BY alias
+		 ORDER BY `+order+`
+		 LIMIT ?`, since.Unix(), limit)
+	if err != nil {
+		return nil, fmt.Errorf("storage: usage leaderboard: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []ModelUsage
+	for rows.Next() {
+		var (
+			m        ModelUsage
+			lastUsed int64
+		)
+		if err := rows.Scan(&m.Alias, &m.Requests, &m.PromptTokens,
+			&m.CompletionTokens, &m.CachedTokens, &m.CostUSD, &lastUsed); err != nil {
+			return nil, fmt.Errorf("storage: scan usage leaderboard: %w", err)
+		}
+		m.LastUsed = time.Unix(lastUsed, 0).UTC()
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("storage: usage leaderboard: %w", err)
+	}
+	return out, nil
+}
+
 func scanUsageEvent(src scanner) (UsageEvent, error) {
 	var (
 		e          UsageEvent

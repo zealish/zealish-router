@@ -167,12 +167,34 @@ type UsageBucket struct {
 	CostUSD          float64
 }
 
+// ModelUsage aggregates lifetime usage for one alias.
+type ModelUsage struct {
+	Alias            string
+	Requests         int
+	PromptTokens     int
+	CompletionTokens int
+	CachedTokens     int
+	CostUSD          float64
+	LastUsed         time.Time
+}
+
+// LeaderboardSort selects the metric a usage leaderboard is ranked by.
+type LeaderboardSort string
+
+const (
+	LeaderboardByRequests LeaderboardSort = "requests"
+	LeaderboardByTokens   LeaderboardSort = "tokens"
+	LeaderboardByCost     LeaderboardSort = "cost"
+)
+
 // UsageStore persists and aggregates the per-request usage log.
 type UsageStore interface {
 	Record(ctx context.Context, e UsageEvent) error
 	Recent(ctx context.Context, limit int) ([]UsageEvent, error)
 	Totals(ctx context.Context, since time.Time) (UsageTotals, error)
 	Series(ctx context.Context, since time.Time, bucket time.Duration) ([]UsageBucket, error)
+	ByModel(ctx context.Context) ([]ModelUsage, error)
+	Leaderboard(ctx context.Context, since time.Time, limit int, sortBy LeaderboardSort) ([]ModelUsage, error)
 }
 
 // Store aggregates every persistence contract of the application.
@@ -648,5 +670,78 @@ func (s *memoryUsage) Series(_ context.Context, since time.Time, bucket time.Dur
 		out = append(out, *b)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Start.Before(out[j].Start) })
+	return out, nil
+}
+
+func (s *memoryUsage) ByModel(_ context.Context) ([]ModelUsage, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	byAlias := map[string]*ModelUsage{}
+	for _, e := range s.events {
+		m, ok := byAlias[e.Alias]
+		if !ok {
+			m = &ModelUsage{Alias: e.Alias}
+			byAlias[e.Alias] = m
+		}
+		m.Requests++
+		m.PromptTokens += e.PromptTokens
+		m.CompletionTokens += e.CompletionTokens
+		m.CachedTokens += e.CachedTokens
+		m.CostUSD += e.CostUSD
+		if e.CreatedAt.After(m.LastUsed) {
+			m.LastUsed = e.CreatedAt
+		}
+	}
+
+	out := make([]ModelUsage, 0, len(byAlias))
+	for _, m := range byAlias {
+		out = append(out, *m)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].LastUsed.After(out[j].LastUsed) })
+	return out, nil
+}
+
+func (s *memoryUsage) Leaderboard(_ context.Context, since time.Time, limit int, sortBy LeaderboardSort) ([]ModelUsage, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	byAlias := map[string]*ModelUsage{}
+	for _, e := range s.events {
+		if e.CreatedAt.Before(since) {
+			continue
+		}
+		m, ok := byAlias[e.Alias]
+		if !ok {
+			m = &ModelUsage{Alias: e.Alias}
+			byAlias[e.Alias] = m
+		}
+		m.Requests++
+		m.PromptTokens += e.PromptTokens
+		m.CompletionTokens += e.CompletionTokens
+		m.CachedTokens += e.CachedTokens
+		m.CostUSD += e.CostUSD
+		if e.CreatedAt.After(m.LastUsed) {
+			m.LastUsed = e.CreatedAt
+		}
+	}
+
+	out := make([]ModelUsage, 0, len(byAlias))
+	for _, m := range byAlias {
+		out = append(out, *m)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		switch sortBy {
+		case LeaderboardByTokens:
+			return out[i].PromptTokens+out[i].CompletionTokens > out[j].PromptTokens+out[j].CompletionTokens
+		case LeaderboardByCost:
+			return out[i].CostUSD > out[j].CostUSD
+		default:
+			return out[i].Requests > out[j].Requests
+		}
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
 	return out, nil
 }

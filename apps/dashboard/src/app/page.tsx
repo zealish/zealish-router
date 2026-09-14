@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import {
   Area,
   AreaChart,
@@ -23,7 +23,12 @@ import {
 } from "@/components/ui/tabs";
 import { DataTable, DataTableColumnHeader } from "@/components/data-table";
 import type { ColumnDef } from "@tanstack/react-table";
-import type { Overview, UsageEvent, UsageSummary } from "@/lib/api";
+import type {
+  ModelUsage,
+  Overview,
+  UsageEvent,
+  UsageSummary,
+} from "@/lib/api";
 import { useResource } from "@/lib/use-resource";
 
 const POLL_MS = 5000;
@@ -33,6 +38,13 @@ const WINDOWS = [
   { label: "7d", hours: 168 },
   { label: "30d", hours: 720 },
 ];
+const LB_SORTS = [
+  { label: "Requests", value: "requests" },
+  { label: "Tokens", value: "tokens" },
+  { label: "Cost", value: "cost" },
+] as const;
+
+type LbSort = (typeof LB_SORTS)[number]["value"];
 
 const AXIS_PROPS = {
   stroke: "var(--color-muted-foreground)",
@@ -152,39 +164,23 @@ const recentColumns: ColumnDef<UsageEvent, unknown>[] = [
 
 export default function OverviewPage() {
   const [hours, setHours] = useState(24);
+  const [lbHours, setLbHours] = useState(24);
+  const [lbSort, setLbSort] = useState<LbSort>("requests");
   const overview = useResource<Overview>("/overview", POLL_MS);
   const usage = useResource<UsageSummary>(`/usage?hours=${hours}`, POLL_MS);
   const recent = useResource<UsageEvent[]>("/usage/recent?limit=15", POLL_MS);
+  const models = useResource<ModelUsage[]>("/usage/models", POLL_MS);
+  const leaderboard = useResource<ModelUsage[]>(
+    `/usage/leaderboard?hours=${lbHours}&limit=10&sort=${lbSort}`,
+    POLL_MS,
+  );
 
-  const recentModels = useMemo(() => {
-    const byAlias = new Map<
-      string,
-      {
-        alias: string;
-        requests: number;
-        tokens: number;
-        cost: number;
-        lastUsed: number;
-      }
-    >();
-    for (const e of recent.data ?? []) {
-      const row = byAlias.get(e.alias) ?? {
-        alias: e.alias,
-        requests: 0,
-        tokens: 0,
-        cost: 0,
-        lastUsed: 0,
-      };
-      row.requests += 1;
-      row.tokens += e.prompt_tokens + e.completion_tokens;
-      row.cost += e.cost_usd;
-      row.lastUsed = Math.max(row.lastUsed, new Date(e.created_at).getTime());
-      byAlias.set(e.alias, row);
-    }
-    return [...byAlias.values()].sort((a, b) => b.lastUsed - a.lastUsed);
-  }, [recent.data]);
-
-  const error = overview.error ?? usage.error ?? recent.error;
+  const error =
+    overview.error ??
+    usage.error ??
+    recent.error ??
+    models.error ??
+    leaderboard.error;
   if (error) {
     return (
       <>
@@ -196,6 +192,13 @@ export default function OverviewPage() {
 
   const data = overview.data;
   const loading = overview.loading;
+  const lbKey =
+    lbSort === "tokens"
+      ? "total_tokens"
+      : lbSort === "cost"
+        ? "cost_usd"
+        : "requests";
+  const lbTop = leaderboard.data?.length ? leaderboard.data[0][lbKey] || 1 : 1;
 
   return (
     <>
@@ -362,23 +365,23 @@ export default function OverviewPage() {
             <CardTitle>Recent models</CardTitle>
           </CardHeader>
           <CardContent>
-            {!recentModels.length ? (
+            {!models.data?.length ? (
               <p className="text-muted-foreground py-6 text-center text-sm">
-                {recent.loading ? "Loading…" : "No requests yet."}
+                {models.loading ? "Loading…" : "No requests yet."}
               </p>
             ) : (
               <ul className="space-y-3">
-                {recentModels.map((m) => (
+                {models.data.map((m) => (
                   <li key={m.alias} className="flex items-center gap-3">
                     <div className="min-w-0 flex-1">
                       <p className="truncate font-mono text-xs">{m.alias}</p>
                       <p className="text-muted-foreground text-xs">
                         {m.requests} {m.requests === 1 ? "request" : "requests"}{" "}
-                        · {formatTokens(m.tokens)} tokens
+                        · {formatTokens(m.total_tokens)} tokens
                       </p>
                     </div>
                     <span className="text-xs tabular-nums">
-                      {formatCost(m.cost)}
+                      {formatCost(m.cost_usd)}
                     </span>
                   </li>
                 ))}
@@ -421,6 +424,80 @@ export default function OverviewPage() {
         <Stat label="Models" value={data?.models} loading={loading} />
         <Stat label="API keys" value={data?.api_keys} loading={loading} />
       </div>
+
+      <Card className="mt-6">
+        <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-4 space-y-0">
+          <CardTitle>Model leaderboard</CardTitle>
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex gap-1">
+              {LB_SORTS.map((s) => (
+                <Button
+                  key={s.value}
+                  size="sm"
+                  variant={lbSort === s.value ? "default" : "outline"}
+                  onClick={() => setLbSort(s.value)}
+                >
+                  {s.label}
+                </Button>
+              ))}
+            </div>
+            <div className="flex gap-1">
+              {WINDOWS.map((w) => (
+                <Button
+                  key={w.hours}
+                  size="sm"
+                  variant={lbHours === w.hours ? "default" : "outline"}
+                  onClick={() => setLbHours(w.hours)}
+                >
+                  {w.label}
+                </Button>
+              ))}
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent>
+          {!leaderboard.data?.length ? (
+            <p className="text-muted-foreground py-6 text-center text-sm">
+              {leaderboard.loading ? "Loading…" : "No requests yet."}
+            </p>
+          ) : (
+            <ol className="space-y-3">
+              {leaderboard.data.map((m, i) => {
+                return (
+                  <li key={m.alias} className="flex items-center gap-3">
+                    <span
+                      className={`w-6 text-center text-sm font-semibold tabular-nums ${
+                        i < 3 ? "text-primary" : "text-muted-foreground"
+                      }`}
+                    >
+                      {i + 1}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-baseline justify-between gap-3">
+                        <p className="truncate font-mono text-xs">{m.alias}</p>
+                        <p className="text-muted-foreground shrink-0 text-xs tabular-nums">
+                          {formatInt(m.requests)}{" "}
+                          {m.requests === 1 ? "request" : "requests"} ·{" "}
+                          {formatTokens(m.total_tokens)} tokens ·{" "}
+                          {formatCost(m.cost_usd)}
+                        </p>
+                      </div>
+                      <div className="bg-muted mt-1.5 h-1.5 overflow-hidden rounded-full">
+                        <div
+                          className="bg-primary h-full rounded-full"
+                          style={{
+                            width: `${Math.max((m[lbKey] / lbTop) * 100, 2)}%`,
+                          }}
+                        />
+                      </div>
+                    </div>
+                  </li>
+                );
+              })}
+            </ol>
+          )}
+        </CardContent>
+      </Card>
     </>
   );
 }
