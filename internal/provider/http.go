@@ -154,6 +154,29 @@ func scanSSE(body io.Reader, fn func(event, data string) bool) {
 	flush()
 }
 
+// Embeddings performs an embeddings request against the upstream.
+func (p *httpProvider) Embeddings(ctx context.Context, req *openai.EmbeddingRequest) (*openai.EmbeddingResponse, error) {
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return nil, &Error{Provider: p.opts.Name, Message: fmt.Sprintf("encode request: %v", err)}
+	}
+
+	resp, err := p.do(ctx, "embeddings", payload, false)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
+
+	var out openai.EmbeddingResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, &Error{Provider: p.opts.Name, Message: fmt.Sprintf("decode response: %v", err)}
+	}
+	return &out, nil
+}
+
 // post sends an OpenAI-format body to the upstream's chat/completions path.
 func (p *httpProvider) post(ctx context.Context, body *openai.ChatCompletionRequest, stream bool) (*http.Response, error) {
 	payload, err := json.Marshal(body)

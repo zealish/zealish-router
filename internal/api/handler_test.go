@@ -65,6 +65,18 @@ func (s *stubProvider) ChatCompletionStream(_ context.Context, _ *openai.ChatCom
 	return ch, nil
 }
 
+func (s *stubProvider) Embeddings(_ context.Context, req *openai.EmbeddingRequest) (*openai.EmbeddingResponse, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return &openai.EmbeddingResponse{
+		Object: "list",
+		Model:  req.Model,
+		Data:   []openai.Embedding{{Object: "embedding", Index: 0, Embedding: json.RawMessage(`[0.1,0.2,0.3]`)}},
+		Usage:  &openai.Usage{PromptTokens: 4, TotalTokens: 4},
+	}, nil
+}
+
 // newTestServer wires a full routing table around p, with auth disabled.
 func newTestServer(t *testing.T, p provider.Provider) http.Handler {
 	return newTestServerWithConfig(t, p, nil)
@@ -334,5 +346,91 @@ func TestRecovererReturnsGenericError(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "hunter2") {
 		t.Error("panic value was not logged")
+	}
+}
+
+func postTo(t *testing.T, h http.Handler, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestEmbeddingsHappyPath(t *testing.T) {
+	h := newTestServer(t, &stubProvider{name: "openai"})
+
+	rec := postTo(t, h, "/v1/embeddings", `{"model":"gpt-5","input":"hello"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+
+	var resp openai.EmbeddingResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Model != "gpt-5-upstream" {
+		t.Errorf("model = %q, want the resolved upstream name", resp.Model)
+	}
+	if len(resp.Data) != 1 || string(resp.Data[0].Embedding) != "[0.1,0.2,0.3]" {
+		t.Errorf("data = %+v, want the upstream vector passed through", resp.Data)
+	}
+}
+
+func TestEmbeddingsMissingInput(t *testing.T) {
+	h := newTestServer(t, &stubProvider{name: "openai"})
+
+	rec := postTo(t, h, "/v1/embeddings", `{"model":"gpt-5"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	if msg := decodeError(t, rec).Error.Message; !strings.Contains(msg, "input") {
+		t.Errorf("message = %q, want it to mention 'input'", msg)
+	}
+}
+
+func TestEmbeddingsMissingModel(t *testing.T) {
+	h := newTestServer(t, &stubProvider{name: "openai"})
+
+	rec := postTo(t, h, "/v1/embeddings", `{"input":"hello"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
+
+func TestEmbeddingsUnknownAlias(t *testing.T) {
+	h := newTestServer(t, &stubProvider{name: "openai"})
+
+	rec := postTo(t, h, "/v1/embeddings", `{"model":"does-not-exist","input":"hi"}`)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+func TestEmbeddingsUpstreamFailureIsBadGateway(t *testing.T) {
+	p := &stubProvider{name: "openai", err: &provider.Error{
+		Provider: "openai", Status: 503, Kind: provider.ErrUpstream5xx, Message: "down",
+	}}
+	h := newTestServer(t, p)
+
+	rec := postTo(t, h, "/v1/embeddings", `{"model":"gpt-5","input":"hi"}`)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", rec.Code)
+	}
+	if msg := decodeError(t, rec).Error.Message; strings.Contains(msg, "down") {
+		t.Error("internal upstream detail leaked to the client")
+	}
+}
+
+func TestEmbeddingsUnsupportedDialectIsBadRequest(t *testing.T) {
+	p := &stubProvider{name: "openai", err: &provider.Error{
+		Provider: "openai", Kind: provider.ErrUnsupported, Message: "no embeddings endpoint",
+	}}
+	h := newTestServer(t, p)
+
+	rec := postTo(t, h, "/v1/embeddings", `{"model":"gpt-5","input":"hi"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
 	}
 }

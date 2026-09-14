@@ -240,6 +240,17 @@ func (p *Anthropic) ChatCompletionStream(ctx context.Context, req *openai.ChatCo
 	return out, nil
 }
 
+// Embeddings is not part of the Anthropic API. The request is rejected rather
+// than translated, so a misrouted alias fails loudly instead of hitting a
+// nonexistent path.
+func (p *Anthropic) Embeddings(context.Context, *openai.EmbeddingRequest) (*openai.EmbeddingResponse, error) {
+	return nil, &Error{
+		Provider: p.opts.Name,
+		Kind:     ErrUnsupported,
+		Message:  "the Anthropic API has no embeddings endpoint",
+	}
+}
+
 // pumpAnthropic translates an Anthropic SSE stream into OpenAI chunks. Token
 // usage is carried on the terminating chunk so the metering layer sees it in
 // the same place as with an OpenAI upstream.

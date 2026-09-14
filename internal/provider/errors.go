@@ -19,6 +19,11 @@ var (
 	ErrConnection = errors.New("provider: connection error")
 )
 
+// ErrUnsupported marks an endpoint the upstream dialect does not implement.
+// It is terminal: no other provider in the chain is more likely to succeed
+// for a request the operator pointed at the wrong dialect.
+var ErrUnsupported = errors.New("provider: endpoint not supported")
+
 // Error carries the upstream context of a failed provider call. Kind, when set,
 // is one of the retryable sentinels above.
 type Error struct {

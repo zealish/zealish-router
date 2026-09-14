@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -60,6 +61,17 @@ func (f *fakeProvider) ChatCompletionStream(_ context.Context, req *openai.ChatC
 	ch <- openai.StreamChunk{ID: f.name, Model: req.Model}
 	close(ch)
 	return ch, nil
+}
+
+func (f *fakeProvider) Embeddings(_ context.Context, req *openai.EmbeddingRequest) (*openai.EmbeddingResponse, error) {
+	if err := f.next(); err != nil {
+		return nil, err
+	}
+	return &openai.EmbeddingResponse{
+		Object: "list",
+		Model:  req.Model,
+		Data:   []openai.Embedding{{Object: "embedding", Index: 0, Embedding: json.RawMessage(`[0.1,0.2]`)}},
+	}, nil
 }
 
 func (f *fakeProvider) callCount() int {
@@ -352,5 +364,41 @@ func TestBackoffWithinBounds(t *testing.T) {
 				t.Fatalf("backoff(%d) = %v, out of (0, %v]", n, d, e.retry.MaxDelay)
 			}
 		}
+	}
+}
+
+func TestEmbeddingsFallsBackOnRetryableError(t *testing.T) {
+	primary := &fakeProvider{name: "openai", results: []error{upstreamErr(503, provider.ErrUpstream5xx)}}
+	secondary := &fakeProvider{name: "openrouter"}
+	e := newTestEngine(t, newRecorder(), primary, secondary)
+
+	resp, err := e.Embeddings(context.Background(), &openai.EmbeddingRequest{
+		Model: "gpt-5",
+		Input: json.RawMessage(`"hi"`),
+	})
+	if err != nil {
+		t.Fatalf("Embeddings: %v", err)
+	}
+	if resp.Model != "gpt-5-mini" {
+		t.Errorf("model = %q, want the fallback route's upstream model", resp.Model)
+	}
+	if secondary.callCount() != 1 {
+		t.Errorf("fallback calls = %d, want 1", secondary.callCount())
+	}
+}
+
+func TestEmbeddingsTerminalErrorDoesNotFallBack(t *testing.T) {
+	primary := &fakeProvider{name: "openai", results: []error{upstreamErr(http.StatusBadRequest, nil)}}
+	secondary := &fakeProvider{name: "openrouter"}
+	e := newTestEngine(t, newRecorder(), primary, secondary)
+
+	if _, err := e.Embeddings(context.Background(), &openai.EmbeddingRequest{
+		Model: "gpt-5",
+		Input: json.RawMessage(`"hi"`),
+	}); err == nil {
+		t.Fatal("want an error")
+	}
+	if secondary.callCount() != 0 {
+		t.Errorf("fallback calls = %d, want 0", secondary.callCount())
 	}
 }

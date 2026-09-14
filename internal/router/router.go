@@ -252,12 +252,15 @@ func (rt *routes) entrypoints(name string) []string {
 // the fallback chain on retryable upstream failures.
 func (e *Engine) ChatCompletion(ctx context.Context, req *openai.ChatCompletionRequest) (*openai.ChatCompletionResponse, error) {
 	meta := metaFrom(ctx, time.Now())
-	return dispatch(ctx, e, req, false, meta, func(p provider.Provider, route Route, upstream *openai.ChatCompletionRequest) (*openai.ChatCompletionResponse, error) {
-		resp, err := p.ChatCompletion(ctx, upstream)
+	return dispatch(ctx, e, req.Model, false, meta, func(p provider.Provider, route Route) (*openai.ChatCompletionResponse, error) {
+		upstream := *req
+		upstream.Model = route.Model
+
+		resp, err := p.ChatCompletion(ctx, &upstream)
 		if err != nil {
 			return nil, err
 		}
-		e.recordUsage(route, usageOf(resp.Usage, upstream, resp.Choices), false, meta)
+		e.recordUsage(route, usageOf(resp.Usage, &upstream, resp.Choices), false, meta)
 		return resp, nil
 	})
 }
@@ -267,12 +270,32 @@ func (e *Engine) ChatCompletion(ctx context.Context, req *openai.ChatCompletionR
 // chunk may already be in flight, so the response is committed.
 func (e *Engine) ChatCompletionStream(ctx context.Context, req *openai.ChatCompletionRequest) (<-chan openai.StreamChunk, error) {
 	meta := metaFrom(ctx, time.Now())
-	return dispatch(ctx, e, req, true, meta, func(p provider.Provider, route Route, upstream *openai.ChatCompletionRequest) (<-chan openai.StreamChunk, error) {
-		chunks, err := p.ChatCompletionStream(ctx, upstream)
+	return dispatch(ctx, e, req.Model, true, meta, func(p provider.Provider, route Route) (<-chan openai.StreamChunk, error) {
+		upstream := *req
+		upstream.Model = route.Model
+
+		chunks, err := p.ChatCompletionStream(ctx, &upstream)
 		if err != nil {
 			return nil, err
 		}
-		return e.meterStream(ctx, route, upstream, chunks, meta), nil
+		return e.meterStream(ctx, route, &upstream, chunks, meta), nil
+	})
+}
+
+// Embeddings routes an embeddings request through the same alias, fallback and
+// retry machinery as a completion. There is no streaming variant.
+func (e *Engine) Embeddings(ctx context.Context, req *openai.EmbeddingRequest) (*openai.EmbeddingResponse, error) {
+	meta := metaFrom(ctx, time.Now())
+	return dispatch(ctx, e, req.Model, false, meta, func(p provider.Provider, route Route) (*openai.EmbeddingResponse, error) {
+		upstream := *req
+		upstream.Model = route.Model
+
+		resp, err := p.Embeddings(ctx, &upstream)
+		if err != nil {
+			return nil, err
+		}
+		e.recordUsage(route, embeddingUsage(resp.Usage, &upstream), false, meta)
+		return resp, nil
 	})
 }
 
@@ -280,13 +303,13 @@ func (e *Engine) ChatCompletionStream(ctx context.Context, req *openai.ChatCompl
 // according to the engine policy, and returns the first successful result.
 // A request that fails after reaching at least one provider is appended to the
 // usage log with its failure class so totals count every hit on a model.
-func dispatch[T any](ctx context.Context, e *Engine, req *openai.ChatCompletionRequest, streamed bool, meta callMeta, call func(provider.Provider, Route, *openai.ChatCompletionRequest) (T, error)) (T, error) {
+func dispatch[T any](ctx context.Context, e *Engine, model string, streamed bool, meta callMeta, call func(provider.Provider, Route) (T, error)) (T, error) {
 	var zero T
 
 	// Pin one snapshot for the whole walk: a reload mid-chain must not move
 	// the aliases out from under this request.
 	rt := e.routes.Load()
-	chain := rt.chain(req.Model)
+	chain := rt.chain(model)
 	var lastErr error
 	var lastRoute Route
 	attempted := false
@@ -294,13 +317,13 @@ func dispatch[T any](ctx context.Context, e *Engine, req *openai.ChatCompletionR
 	for _, alias := range chain {
 		p, route, err := rt.pick(alias)
 		if err != nil {
-			if alias == req.Model {
+			if alias == model {
 				// The requested alias itself is unroutable: terminal. A combo
 				// never matches here, so its members are all skippable.
 				return zero, err
 			}
 			e.logger.Warn("skipping unroutable route",
-				slog.String("requested", req.Model),
+				slog.String("requested", model),
 				slog.String("alias", alias),
 				slog.Any("error", err))
 			lastErr = err
@@ -312,7 +335,7 @@ func dispatch[T any](ctx context.Context, e *Engine, req *openai.ChatCompletionR
 		// if the route had failed.
 		if !e.breakers.allow(route.Provider) {
 			e.logger.Warn("skipping route with open circuit",
-				slog.String("requested", req.Model),
+				slog.String("requested", model),
 				slog.String("alias", alias),
 				slog.String("provider", route.Provider))
 			e.record(route.Provider, "circuit_open")
@@ -320,12 +343,9 @@ func dispatch[T any](ctx context.Context, e *Engine, req *openai.ChatCompletionR
 			continue
 		}
 
-		upstream := *req
-		upstream.Model = route.Model
-
 		lastRoute, attempted = route, true
 
-		result, err := attempt(ctx, e, route, func() (T, error) { return call(p, route, &upstream) })
+		result, err := attempt(ctx, e, route, func() (T, error) { return call(p, route) })
 		if err == nil {
 			return result, nil
 		}
@@ -342,7 +362,7 @@ func dispatch[T any](ctx context.Context, e *Engine, req *openai.ChatCompletionR
 	}
 
 	if lastErr == nil {
-		return zero, fmt.Errorf("%w: %s", ErrUnknownModel, req.Model)
+		return zero, fmt.Errorf("%w: %s", ErrUnknownModel, model)
 	}
 	if attempted {
 		e.recordFailure(lastRoute, streamed, classify(lastErr), meta)

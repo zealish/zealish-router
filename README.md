@@ -14,7 +14,7 @@ License: Apache-2.0 · Platform: Linux, Docker
 
 ## Features
 
-- OpenAI-compatible `POST /v1/chat/completions` and `GET /v1/models`
+- OpenAI-compatible `POST /v1/chat/completions`, `POST /v1/embeddings` and `GET /v1/models`
 - Two wire dialects — OpenAI and Anthropic — plus a preset catalogue for known
   upstreams (OpenAI, OpenRouter, Groq, Ollama, …); any compatible endpoint works
 - Model aliases with a deterministic fallback chain
@@ -119,6 +119,17 @@ curl http://localhost:8787/v1/chat/completions \
 Streaming is the same request with `"stream": true`; the response is an SSE
 stream terminated by `data: [DONE]`.
 
+Embeddings use the same aliases, fallback chain and cost accounting:
+
+```sh
+curl http://localhost:8787/v1/embeddings \
+  -H "Authorization: Bearer zr_…" -H 'Content-Type: application/json' \
+  -d '{"model":"embed","input":"hello"}'
+```
+
+An alias pointing at an Anthropic-dialect provider rejects the call with a 400:
+that API has no embeddings endpoint.
+
 Using an OpenAI SDK:
 
 ```python
@@ -199,6 +210,7 @@ version                      print the build version
 | Method | Path | Description |
 |---|---|---|
 | `POST` | `/v1/chat/completions` | OpenAI chat completions, streaming and non-streaming |
+| `POST` | `/v1/embeddings` | OpenAI embeddings; same aliases, fallback and cost accounting |
 | `GET` | `/v1/models` | Configured aliases and combos |
 
 ### Operations (no auth)

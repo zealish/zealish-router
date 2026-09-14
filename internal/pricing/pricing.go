@@ -165,6 +165,9 @@ var models = map[string]Rate{
 	"oswe-vscode-prime":          {Input: 1.0, Output: 4.0, Cached: 0.5, Reasoning: 6.0, CacheWrite: 1.0},
 	"qwen3-coder-flash":          {Input: 0.5, Output: 2.0, Cached: 0.25, Reasoning: 3.0, CacheWrite: 0.5},
 	"qwen3-coder-plus":           {Input: 1.0, Output: 4.0, Cached: 0.5, Reasoning: 6.0, CacheWrite: 1.0},
+	"text-embedding-3-large":     {Input: 0.13},
+	"text-embedding-3-small":     {Input: 0.02},
+	"text-embedding-ada-002":     {Input: 0.1},
 	"vision-model":               {Input: 1.5, Output: 6.0, Cached: 0.75, Reasoning: 9.0, CacheWrite: 1.5},
 }
 
@@ -225,6 +228,7 @@ var patterns = []struct {
 	{"minimax-*", Rate{Input: 0.5, Output: 2.0, Cached: 0.25, Reasoning: 3.0, CacheWrite: 0.5}},
 	{"grok-code-*", Rate{Input: 0.5, Output: 2.0, Cached: 0.25, Reasoning: 3.0, CacheWrite: 0.5}},
 	{"grok-*", Rate{Input: 0.5, Output: 2.0, Cached: 0.25, Reasoning: 3.0, CacheWrite: 0.5}},
+	{"text-embedding-*", Rate{Input: 0.02}},
 }
 
 // globRE compiles a "*" glob into an anchored, case-insensitive regexp.

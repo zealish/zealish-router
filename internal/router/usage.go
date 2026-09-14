@@ -132,6 +132,15 @@ func usageOf(reported *openai.Usage, req *openai.ChatCompletionRequest, choices 
 	return u
 }
 
+// embeddingUsage prefers the upstream's own accounting and falls back to
+// estimating from the input text. Embeddings produce no completion tokens.
+func embeddingUsage(reported *openai.Usage, req *openai.EmbeddingRequest) usage {
+	if reported != nil && reported.PromptTokens > 0 {
+		return fromReported(reported)
+	}
+	return usage{prompt: estimateContent(req.Input)}
+}
+
 // meterStream wraps chunks so token usage is recorded once the stream ends.
 // A chunk carrying usage wins; otherwise the deltas are estimated. A cancelled
 // ctx — typically a client disconnect — ends the relay and still records what

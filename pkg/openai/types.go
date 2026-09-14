@@ -226,6 +226,76 @@ func (c StreamChunk) MarshalJSON() ([]byte, error) {
 	return encodeExtras(alias(c), c.Extra)
 }
 
+// EmbeddingRequest mirrors POST /v1/embeddings.
+//
+// Input stays as raw JSON: the OpenAI schema allows a string, an array of
+// strings, an array of token ids, or an array of token-id arrays, and a
+// gateway has no reason to re-encode any of them.
+type EmbeddingRequest struct {
+	Model          string          `json:"model"`
+	Input          json.RawMessage `json:"input"`
+	EncodingFormat string          `json:"encoding_format,omitempty"`
+	Dimensions     *int            `json:"dimensions,omitempty"`
+	User           string          `json:"user,omitempty"`
+
+	// Extra carries request fields this gateway does not model.
+	Extra map[string]json.RawMessage `json:"-"`
+}
+
+// UnmarshalJSON decodes a request, capturing unmodelled fields into Extra.
+func (r *EmbeddingRequest) UnmarshalJSON(data []byte) error {
+	type alias EmbeddingRequest
+	ex, err := decodeExtras[EmbeddingRequest](data, (*alias)(r))
+	if err != nil {
+		return err
+	}
+	r.Extra = ex
+	return nil
+}
+
+// MarshalJSON encodes the request, folding Extra back into the object.
+func (r EmbeddingRequest) MarshalJSON() ([]byte, error) {
+	type alias EmbeddingRequest
+	return encodeExtras(alias(r), r.Extra)
+}
+
+// Embedding is one vector of an embeddings response. Embedding stays raw
+// because encoding_format switches it between a float array and a base64
+// string, and both are passed through untouched.
+type Embedding struct {
+	Object    string          `json:"object"`
+	Index     int             `json:"index"`
+	Embedding json.RawMessage `json:"embedding"`
+}
+
+// EmbeddingResponse mirrors a POST /v1/embeddings response.
+type EmbeddingResponse struct {
+	Object string      `json:"object"`
+	Data   []Embedding `json:"data"`
+	Model  string      `json:"model"`
+	Usage  *Usage      `json:"usage,omitempty"`
+
+	// Extra carries response fields this gateway does not model.
+	Extra map[string]json.RawMessage `json:"-"`
+}
+
+// UnmarshalJSON decodes a response, capturing unmodelled fields into Extra.
+func (r *EmbeddingResponse) UnmarshalJSON(data []byte) error {
+	type alias EmbeddingResponse
+	ex, err := decodeExtras[EmbeddingResponse](data, (*alias)(r))
+	if err != nil {
+		return err
+	}
+	r.Extra = ex
+	return nil
+}
+
+// MarshalJSON encodes the response, folding Extra back into the object.
+func (r EmbeddingResponse) MarshalJSON() ([]byte, error) {
+	type alias EmbeddingResponse
+	return encodeExtras(alias(r), r.Extra)
+}
+
 // Model describes an entry of GET /v1/models.
 type Model struct {
 	ID      string `json:"id"`

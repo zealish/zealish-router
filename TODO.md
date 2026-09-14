@@ -243,6 +243,37 @@ Legend: `[x]` done · `[ ]` pending · `~` partial (scaffold only, no logic)
 
 ---
 
+## v1.2 — Embeddings ✅
+
+- [x] `openai.EmbeddingRequest` / `EmbeddingResponse` — `input` and `embedding`
+      stay `json.RawMessage`, so string/array input and float/base64 output all
+      pass through untouched; both carry `Extra` like the chat types
+- [x] `provider.Provider` gains `Embeddings`; `httpProvider` posts to
+      `{base_url}/embeddings` and reuses the shared error mapping
+- [x] `provider.ErrUnsupported` — terminal sentinel; the Anthropic dialect
+      returns it instead of translating a request to a path that does not exist
+- [x] `dispatch` generalised from `*ChatCompletionRequest` to a model name, so
+      embeddings inherit alias resolution, fallback, retry, backoff and the
+      circuit breaker unchanged; the per-call closure now rewrites its own
+      upstream model
+- [x] `Engine.Embeddings` — no streaming variant
+- [x] `POST /v1/embeddings` behind the same auth, quota and body limit as
+      `/v1/chat/completions`; `ErrUnsupported` maps to 400
+- [x] Usage log and pricing: `embeddingUsage` prefers reported prompt tokens and
+      estimates from the input otherwise; `text-embedding-*` rates added
+
+### Tests
+- [x] Provider: happy path hits `/embeddings` with the credential and forwards
+      `input` verbatim; 429 maps to `ErrRateLimited`; Anthropic reports
+      `ErrUnsupported` and it is not retryable
+- [x] Router: retryable failure falls back to the next route, terminal 4xx does
+      not
+- [x] HTTP: happy path returns the vector and the resolved upstream model,
+      missing `model`/`input` are 400, unknown alias 404, upstream 5xx is a 502
+      with no detail leak, `ErrUnsupported` is a 400
+
+---
+
 ## Open Decisions
 
 | # | Decision | Options | Status |
@@ -257,22 +288,19 @@ Legend: `[x]` done · `[ ]` pending · `~` partial (scaffold only, no logic)
 
 ## Next Action
 
-**v1.1 is feature-complete.** Cost accountability landed: every usage row is
-attributed to its API key, the log is bounded by `usage.retention_days`, and
-per-key rate limits and monthly budgets are enforced on `/v1`. Suite is green
-under `-race`, the dashboard lints and builds, and migrations were verified
-against the production database. Remaining: tag `v1.0.0`, then `v1.1.0`.
+**v1.2 is feature-complete.** `POST /v1/embeddings` closes the last commonly
+needed OpenAI endpoint: it shares the alias table, fallback chain, retry policy,
+circuit breaker, quotas and cost accounting with chat completions, and rejects
+the Anthropic dialect up front. Suite is green under `-race`. Remaining: tag
+`v1.0.0`, then `v1.1.0` and `v1.2.0`.
 
-Candidates for the next cycle, in the order they were recommended:
-- ~~Provider circuit breaker~~ — **done.** Per-provider breaker in
-  `internal/router/breaker.go`: consecutive `provider.Retryable` failures trip
-  the circuit, a cooldown then admits one half-open probe. An open circuit is
-  skipped without a call, so the chain advances instead of paying the timeout.
-  State survives reloads, is exposed as `circuit` on `GET /providers` and
-  `router_circuit_state`, and is badged on the Providers page. Terminal 4xx
-  never trips it. Tunable globally via `router.breaker` in `config.yaml`
-  (`failure_threshold`, `cooldown`), overridable per provider through
-  `breaker_threshold`/`breaker_cooldown_ms` (migration `0010`); null inherits
-  the global policy and 0 disables the breaker for that provider.
-- `POST /v1/embeddings` — the one commonly needed OpenAI endpoint still missing;
-  reuses the alias, fallback and pricing machinery.
+Candidates for the next cycle, in the order they are recommended:
+- Provider load balancing — the chain is strictly primary-then-fallback, so two
+  equivalent providers cannot share traffic. Weighted or round-robin selection
+  on an alias would turn multiple keys or upstreams into capacity, not just
+  failover. The combo pool already has cursors to build on.
+- Request log viewer — `usage_events` records the outcome but not the route
+  taken. Surfacing per-request attempts, the provider that answered and the
+  latency would make fallback debuggable without reading slog.
+- Per-key model allowlist — a key can currently reach every alias. Restricting
+  which models a key may address complements the quotas shipped in v1.1.

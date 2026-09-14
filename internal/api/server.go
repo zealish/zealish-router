@@ -74,6 +74,7 @@ func newRoutes(deps Dependencies, h *handler) http.Handler {
 		v1.Use(enforceQuota(deps.Quota))
 		v1.Get("/models", h.listModels)
 		v1.Post("/chat/completions", h.chatCompletions)
+		v1.Post("/embeddings", h.embeddings)
 	})
 
 	if deps.Config.Admin.Enabled {

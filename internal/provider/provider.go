@@ -19,6 +19,7 @@ type Provider interface {
 	Name() string
 	ChatCompletion(ctx context.Context, req *openai.ChatCompletionRequest) (*openai.ChatCompletionResponse, error)
 	ChatCompletionStream(ctx context.Context, req *openai.ChatCompletionRequest) (<-chan openai.StreamChunk, error)
+	Embeddings(ctx context.Context, req *openai.EmbeddingRequest) (*openai.EmbeddingResponse, error)
 }
 
 // Registry is an immutable lookup table of providers keyed by name.

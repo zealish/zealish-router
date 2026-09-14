@@ -39,6 +39,15 @@ func (u *usageProvider) ChatCompletionStream(_ context.Context, _ *openai.ChatCo
 	return ch, nil
 }
 
+func (u *usageProvider) Embeddings(_ context.Context, req *openai.EmbeddingRequest) (*openai.EmbeddingResponse, error) {
+	return &openai.EmbeddingResponse{
+		Object: "list",
+		Model:  req.Model,
+		Data:   []openai.Embedding{{Object: "embedding", Index: 0, Embedding: json.RawMessage(`[0.5]`)}},
+		Usage:  u.usage,
+	}, nil
+}
+
 func mustJSON(s string) json.RawMessage {
 	raw, _ := json.Marshal(s)
 	return raw

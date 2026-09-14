@@ -277,3 +277,76 @@ func writeJSON(t *testing.T, w http.ResponseWriter, v any) {
 		t.Errorf("encode: %v", err)
 	}
 }
+
+func TestEmbeddingsHappyPath(t *testing.T) {
+	var gotPath string
+	var gotHeaders http.Header
+	var gotBody openai.EmbeddingRequest
+
+	p, _ := newTestProvider(t, "openai", func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotHeaders = r.Header.Clone()
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Errorf("decode upstream body: %v", err)
+		}
+		writeJSON(t, w, openai.EmbeddingResponse{
+			Object: "list",
+			Model:  "text-embedding-3-small",
+			Data:   []openai.Embedding{{Object: "embedding", Index: 0, Embedding: json.RawMessage(`[0.1,0.2]`)}},
+			Usage:  &openai.Usage{PromptTokens: 5, TotalTokens: 5},
+		})
+	})
+
+	resp, err := p.Embeddings(context.Background(), &openai.EmbeddingRequest{
+		Model: "text-embedding-3-small",
+		Input: json.RawMessage(`"hi"`),
+	})
+	if err != nil {
+		t.Fatalf("Embeddings: %v", err)
+	}
+	if gotPath != "/embeddings" {
+		t.Errorf("path = %q, want /embeddings", gotPath)
+	}
+	if auth := gotHeaders.Get("Authorization"); auth != "Bearer sk-test" {
+		t.Errorf("Authorization = %q", auth)
+	}
+	if string(gotBody.Input) != `"hi"` {
+		t.Errorf("input = %s, want the raw payload forwarded", gotBody.Input)
+	}
+	if len(resp.Data) != 1 || string(resp.Data[0].Embedding) != "[0.1,0.2]" {
+		t.Fatalf("unexpected data: %+v", resp.Data)
+	}
+	if resp.Usage == nil || resp.Usage.PromptTokens != 5 {
+		t.Fatalf("usage not decoded: %+v", resp.Usage)
+	}
+}
+
+func TestEmbeddingsErrorMapping(t *testing.T) {
+	p, _ := newTestProvider(t, "openai", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		writeJSON(t, w, openai.ErrorResponse{Error: openai.Error{Message: "slow down"}})
+	})
+
+	_, err := p.Embeddings(context.Background(), &openai.EmbeddingRequest{
+		Model: "text-embedding-3-small",
+		Input: json.RawMessage(`"hi"`),
+	})
+	if !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("err = %v, want ErrRateLimited", err)
+	}
+}
+
+func TestAnthropicEmbeddingsUnsupported(t *testing.T) {
+	p := NewAnthropic(Options{Name: "anthropic", BaseURL: "http://invalid.test", APIKey: "sk-ant-test"})
+
+	_, err := p.Embeddings(context.Background(), &openai.EmbeddingRequest{
+		Model: "claude-sonnet-4.5",
+		Input: json.RawMessage(`"hi"`),
+	})
+	if !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("err = %v, want ErrUnsupported", err)
+	}
+	if Retryable(err) {
+		t.Error("an unsupported endpoint must not be retryable")
+	}
+}

@@ -65,6 +65,29 @@ func (h *handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+func (h *handler) embeddings(w http.ResponseWriter, r *http.Request) {
+	var req openai.EmbeddingRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeDecodeError(w, err, "Malformed JSON body.")
+		return
+	}
+	if req.Model == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "Field 'model' is required.")
+		return
+	}
+	if len(req.Input) == 0 {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "Field 'input' is required.")
+		return
+	}
+
+	resp, err := h.engine.Embeddings(r.Context(), &req)
+	if err != nil {
+		h.writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
 func (h *handler) streamCompletion(w http.ResponseWriter, r *http.Request, req *openai.ChatCompletionRequest) {
 	sse, err := stream.NewWriter(w)
 	if err != nil {
@@ -105,6 +128,11 @@ func (h *handler) writeEngineError(w http.ResponseWriter, err error) {
 	case errors.Is(err, context.Canceled):
 		// Client hung up; nothing useful left to write.
 		return
+	case errors.Is(err, provider.ErrUnsupported):
+		// The alias resolves to a dialect without this endpoint: a routing
+		// mistake, but the client is the one who has to pick another model.
+		h.logger.Warn("endpoint unsupported by route", slog.Any("error", err))
+		writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 	case errors.As(err, &upstream) && !provider.Retryable(err) && upstream.Status > 0:
 		// Terminal 4xx from upstream: surface it as-is, no fallback happened.
 		h.logger.Warn("upstream rejected request",
