@@ -46,6 +46,7 @@ func (l *Loader) Load(ctx context.Context) error {
 	}
 
 	l.engine.Reload(aliases, combos, buildRegistry(providers, NewProxyPool(proxies)))
+	l.engine.SetBreakerOverrides(breakerOverrides(providers, l.engine.BreakerPolicy()))
 	return nil
 }
 
@@ -59,6 +60,27 @@ func buildRegistry(records []storage.Provider, pool *ProxyPool) *provider.Regist
 		clients = append(clients, NewProviderClient(rec, pool))
 	}
 	return provider.NewRegistry(clients...)
+}
+
+// breakerOverrides collects the per-provider circuit breaker policies. A
+// record that overrides only one field inherits the other from the default,
+// so a provider can retune its threshold without restating the cooldown.
+func breakerOverrides(records []storage.Provider, base BreakerPolicy) map[string]BreakerPolicy {
+	out := make(map[string]BreakerPolicy)
+	for _, rec := range records {
+		if rec.BreakerThreshold == nil && rec.BreakerCooldown == nil {
+			continue
+		}
+		policy := base
+		if rec.BreakerThreshold != nil {
+			policy.FailureThreshold = *rec.BreakerThreshold
+		}
+		if rec.BreakerCooldown != nil {
+			policy.Cooldown = *rec.BreakerCooldown
+		}
+		out[rec.Name] = policy
+	}
+	return out
 }
 
 // NewProviderClient instantiates a provider client for a stored record. Kind

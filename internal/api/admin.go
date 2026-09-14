@@ -27,6 +27,7 @@ import (
 type adminHandler struct {
 	store   storage.Store
 	loader  *router.Loader
+	engine  *router.Engine
 	metrics *metrics.Metrics
 	quota   *auth.Quota
 	logger  *slog.Logger
@@ -36,6 +37,7 @@ func newAdminHandler(deps Dependencies) *adminHandler {
 	return &adminHandler{
 		store:   deps.Store,
 		loader:  deps.Loader,
+		engine:  deps.Engine,
 		metrics: deps.Metrics,
 		quota:   deps.Quota,
 		logger:  deps.Logger,
@@ -338,6 +340,16 @@ type providerResponse struct {
 	Enabled      bool   `json:"enabled"`
 	AliasPrefix  string `json:"alias_prefix"`
 	UseProxyPool bool   `json:"use_proxy_pool"`
+
+	// Circuit reports the breaker phase: "closed", "open" or "half_open".
+	// A provider the engine has never called reports "closed".
+	Circuit string `json:"circuit"`
+	// CircuitRetryAt is when the next probe is admitted, set only while open.
+	CircuitRetryAt string `json:"circuit_retry_at,omitempty"`
+	// BreakerThreshold and BreakerCooldownMS are the per-provider overrides.
+	// Null means the provider inherits the policy from config.yaml.
+	BreakerThreshold  *int   `json:"breaker_threshold"`
+	BreakerCooldownMS *int64 `json:"breaker_cooldown_ms"`
 }
 
 type providerRequest struct {
@@ -350,10 +362,13 @@ type providerRequest struct {
 	Enabled      bool   `json:"enabled"`
 	AliasPrefix  string `json:"alias_prefix"`
 	UseProxyPool bool   `json:"use_proxy_pool"`
+	// Null clears the override and returns the provider to the global policy.
+	BreakerThreshold  *int   `json:"breaker_threshold"`
+	BreakerCooldownMS *int64 `json:"breaker_cooldown_ms"`
 }
 
-func toProviderResponse(p storage.Provider) providerResponse {
-	return providerResponse{
+func toProviderResponse(p storage.Provider, health router.ProviderHealth) providerResponse {
+	resp := providerResponse{
 		Name:         p.Name,
 		Group:        p.Group,
 		CatalogID:    p.CatalogID,
@@ -364,7 +379,20 @@ func toProviderResponse(p storage.Provider) providerResponse {
 		Enabled:      p.Enabled,
 		AliasPrefix:  p.AliasPrefix,
 		UseProxyPool: p.UseProxyPool,
+		Circuit:      string(router.CircuitClosed),
 	}
+	if health.State != "" {
+		resp.Circuit = string(health.State)
+	}
+	if !health.RetryAt.IsZero() {
+		resp.CircuitRetryAt = health.RetryAt.UTC().Format(time.RFC3339)
+	}
+	resp.BreakerThreshold = p.BreakerThreshold
+	if p.BreakerCooldown != nil {
+		ms := p.BreakerCooldown.Milliseconds()
+		resp.BreakerCooldownMS = &ms
+	}
+	return resp
 }
 
 func (h *adminHandler) listProviders(w http.ResponseWriter, r *http.Request) {
@@ -374,9 +402,10 @@ func (h *adminHandler) listProviders(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	health := h.engine.Health()
 	out := make([]providerResponse, 0, len(providers))
 	for _, p := range providers {
-		out = append(out, toProviderResponse(p))
+		out = append(out, toProviderResponse(p, health[p.Name]))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -424,6 +453,24 @@ func (h *adminHandler) putProvider(w http.ResponseWriter, r *http.Request) {
 		UseProxyPool: req.UseProxyPool,
 	}
 
+	if req.BreakerThreshold != nil {
+		if *req.BreakerThreshold < 0 {
+			writeError(w, http.StatusBadRequest, "invalid_request_error",
+				"Field 'breaker_threshold' must be zero or greater; 0 disables the breaker.")
+			return
+		}
+		record.BreakerThreshold = req.BreakerThreshold
+	}
+	if req.BreakerCooldownMS != nil {
+		if *req.BreakerCooldownMS < 0 {
+			writeError(w, http.StatusBadRequest, "invalid_request_error",
+				"Field 'breaker_cooldown_ms' must be zero or greater.")
+			return
+		}
+		cooldown := time.Duration(*req.BreakerCooldownMS) * time.Millisecond
+		record.BreakerCooldown = &cooldown
+	}
+
 	// A catalogue entry supplies the endpoint and dialect, so a preset-backed
 	// provider only needs a credential. Explicit fields still win.
 	if preset, ok := findCatalogEntry(record.CatalogID); ok {
@@ -464,7 +511,7 @@ func (h *adminHandler) putProvider(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, toProviderResponse(record))
+	writeJSON(w, http.StatusOK, toProviderResponse(record, h.engine.Health()[record.Name]))
 }
 
 // findCatalogEntry resolves a preset by id.

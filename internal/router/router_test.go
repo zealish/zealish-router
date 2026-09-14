@@ -70,13 +70,18 @@ func (f *fakeProvider) callCount() int {
 
 // countingRecorder captures routing telemetry.
 type countingRecorder struct {
-	mu     sync.Mutex
-	counts map[string]int
-	tokens map[string]int
+	mu       sync.Mutex
+	counts   map[string]int
+	tokens   map[string]int
+	circuits map[string]string
 }
 
 func newRecorder() *countingRecorder {
-	return &countingRecorder{counts: map[string]int{}, tokens: map[string]int{}}
+	return &countingRecorder{
+		counts:   map[string]int{},
+		tokens:   map[string]int{},
+		circuits: map[string]string{},
+	}
 }
 
 func (c *countingRecorder) RecordProviderError(providerName, reason string) {
@@ -92,10 +97,22 @@ func (c *countingRecorder) RecordTokens(providerName, model string, prompt, comp
 	c.tokens[providerName+"/"+model+"/completion"] += completion
 }
 
+func (c *countingRecorder) RecordCircuitState(providerName, state string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.circuits[providerName] = state
+}
+
 func (c *countingRecorder) get(key string) int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.counts[key]
+}
+
+func (c *countingRecorder) circuit(providerName string) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.circuits[providerName]
 }
 
 func (c *countingRecorder) token(key string) int {

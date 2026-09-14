@@ -55,6 +55,9 @@ type Draft = {
   enabled: boolean;
   alias_prefix: string;
   use_proxy_pool: boolean;
+  // Empty string means "inherit the global policy"; the API wants null.
+  breaker_threshold: string;
+  breaker_cooldown_ms: string;
 };
 
 const blankDraft = (group: ProviderGroup): Draft => ({
@@ -68,12 +71,41 @@ const blankDraft = (group: ProviderGroup): Draft => ({
   enabled: true,
   alias_prefix: "",
   use_proxy_pool: false,
+  breaker_threshold: "",
+  breaker_cooldown_ms: "",
 });
+
 
 /** Default namespace suggested for a provider's imported aliases. */
 const prefixFor = (name: string) => (name ? `${name.trim()}/` : "");
 
 const groupOf = (p: Provider): ProviderGroup => p.group ?? "custom";
+
+/**
+ * CircuitBadge surfaces the router's breaker state. A healthy provider shows
+ * nothing: the badge is an exception report, not a status line.
+ */
+function CircuitBadge({ provider }: { provider: Provider }) {
+  const state = provider.circuit ?? "closed";
+  if (state === "closed") return null;
+
+  const retryAt = provider.circuit_retry_at
+    ? new Date(provider.circuit_retry_at).toLocaleTimeString()
+    : undefined;
+
+  return state === "open" ? (
+    <Badge
+      variant="destructive"
+      title={retryAt ? `Next probe at ${retryAt}` : undefined}
+    >
+      circuit open
+    </Badge>
+  ) : (
+    <Badge variant="outline" title="Probing whether the provider recovered">
+      probing
+    </Badge>
+  );
+}
 
 export default function ProvidersPage() {
   const { data, error, reload } = useResource<Provider[]>("/providers");
@@ -94,6 +126,9 @@ export default function ProvidersPage() {
       group: groupOf(p),
       catalog_id: p.catalog_id ?? "",
       api_key: "",
+      // Null means inherited, which the form shows as an empty field.
+      breaker_threshold: p.breaker_threshold?.toString() ?? "",
+      breaker_cooldown_ms: p.breaker_cooldown_ms?.toString() ?? "",
     });
     setEditing(true);
   };
@@ -127,6 +162,15 @@ export default function ProvidersPage() {
         enabled: draft.enabled,
         alias_prefix: draft.alias_prefix.trim(),
         use_proxy_pool: draft.use_proxy_pool,
+        // A blank field clears the override; null reads as "inherit".
+        breaker_threshold:
+          draft.breaker_threshold.trim() === ""
+            ? null
+            : Number(draft.breaker_threshold),
+        breaker_cooldown_ms:
+          draft.breaker_cooldown_ms.trim() === ""
+            ? null
+            : Number(draft.breaker_cooldown_ms),
       });
       toast.success(`Saved provider '${draft.name}'.`);
       setDraft(undefined);
@@ -203,7 +247,8 @@ export default function ProvidersPage() {
                           <CardDescription className="font-mono text-xs break-all">
                             {p.base_url}
                           </CardDescription>
-                          <CardAction>
+                          <CardAction className="flex items-center gap-1.5">
+                            <CircuitBadge provider={p} />
                             {p.enabled ? (
                               <Badge>enabled</Badge>
                             ) : (
@@ -452,6 +497,51 @@ export default function ProvidersPage() {
                   onCheckedChange={(enabled) => setDraft({ ...draft, enabled })}
                 />
                 <Label htmlFor="enabled">Enabled</Label>
+              </div>
+              <div className="space-y-2 border-t pt-4">
+                <Label className="text-muted-foreground text-xs font-normal">
+                  Circuit breaker — leave blank to inherit the defaults from
+                  config.yaml
+                </Label>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-2">
+                    <Label htmlFor="breaker_threshold">
+                      Failure threshold
+                    </Label>
+                    <Input
+                      id="breaker_threshold"
+                      type="number"
+                      min={0}
+                      placeholder="inherited"
+                      value={draft.breaker_threshold}
+                      onChange={(e) =>
+                        setDraft({
+                          ...draft,
+                          breaker_threshold: e.target.value,
+                        })
+                      }
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="breaker_cooldown_ms">Cooldown (ms)</Label>
+                    <Input
+                      id="breaker_cooldown_ms"
+                      type="number"
+                      min={0}
+                      placeholder="inherited"
+                      value={draft.breaker_cooldown_ms}
+                      onChange={(e) =>
+                        setDraft({
+                          ...draft,
+                          breaker_cooldown_ms: e.target.value,
+                        })
+                      }
+                    />
+                  </div>
+                </div>
+                <p className="text-muted-foreground text-xs">
+                  0 disables the breaker for this provider.
+                </p>
               </div>
             </form>
           ) : null}

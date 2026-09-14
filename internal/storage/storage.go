@@ -49,6 +49,12 @@ type Provider struct {
 	// UseProxyPool routes this provider's upstream traffic through the enabled
 	// proxies in the proxy pool, rotated per request.
 	UseProxyPool bool
+	// BreakerThreshold overrides the configured circuit breaker threshold for
+	// this provider. Nil inherits the global policy; 0 disables the breaker.
+	BreakerThreshold *int
+	// BreakerCooldown overrides the configured breaker cooldown. Nil inherits
+	// the global policy.
+	BreakerCooldown *time.Duration
 }
 
 // ModelAlias maps a client-facing alias onto a provider model, with an

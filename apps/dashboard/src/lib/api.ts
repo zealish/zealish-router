@@ -204,6 +204,9 @@ export type CreatedApiKey = ApiKey & { key: string };
 
 export type ProviderGroup = "custom" | "oauth" | "api_key";
 
+/** Breaker phase, mirroring router.CircuitState in internal/router/breaker.go. */
+export type CircuitState = "closed" | "open" | "half_open";
+
 export type Provider = {
   name: string;
   group: ProviderGroup;
@@ -215,6 +218,11 @@ export type Provider = {
   enabled: boolean;
   alias_prefix: string;
   use_proxy_pool: boolean;
+  circuit?: CircuitState;
+  circuit_retry_at?: string;
+  /** Null means the provider inherits the policy from config.yaml. */
+  breaker_threshold?: number | null;
+  breaker_cooldown_ms?: number | null;
 };
 
 export type ProviderInput = {
@@ -227,6 +235,9 @@ export type ProviderInput = {
   enabled: boolean;
   alias_prefix: string;
   use_proxy_pool?: boolean;
+  /** Null clears the override, returning the provider to the global policy. */
+  breaker_threshold?: number | null;
+  breaker_cooldown_ms?: number | null;
 };
 
 export type Proxy = {

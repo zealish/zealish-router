@@ -202,6 +202,10 @@ func serve(cfg *config.Config, configPath string, logger *slog.Logger) error {
 	collector := metrics.New()
 	engine := router.NewEngine(logger, collector)
 	engine.SetUsageStore(store.Usage())
+	engine.SetBreakerPolicy(router.BreakerPolicy{
+		FailureThreshold: cfg.Router.Breaker.FailureThreshold,
+		Cooldown:         cfg.Router.Breaker.Cooldown,
+	})
 	loader := router.NewLoader(store.Providers(), store.Models(), store.Combos(), store.Proxies(), engine)
 	if err := loader.Load(ctx); err != nil {
 		return err

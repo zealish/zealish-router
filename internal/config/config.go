@@ -22,6 +22,23 @@ type Config struct {
 	Auth     Auth     `yaml:"auth"`
 	Usage    Usage    `yaml:"usage"`
 	Admin    Admin    `yaml:"admin"`
+	Router   Router   `yaml:"router"`
+}
+
+// Router configures the routing engine's resilience policy.
+type Router struct {
+	Breaker Breaker `yaml:"breaker"`
+}
+
+// Breaker is the default circuit breaker policy. Individual providers may
+// override it; these values apply to every provider that does not.
+type Breaker struct {
+	// FailureThreshold is the number of consecutive retryable failures that
+	// takes a provider out of rotation. 0 disables the breaker entirely.
+	FailureThreshold int `yaml:"failure_threshold"`
+	// Cooldown is how long a tripped provider is skipped before one probe
+	// request is allowed through.
+	Cooldown time.Duration `yaml:"cooldown"`
 }
 
 // Server holds HTTP listener settings.
@@ -79,6 +96,9 @@ func Default() *Config {
 		Database: Database{Path: "data/router.db"},
 		Auth:     Auth{Enabled: true},
 		Admin:    Admin{Enabled: true, Origins: []string{"http://localhost:3000"}},
+		Router: Router{
+			Breaker: Breaker{FailureThreshold: 5, Cooldown: 30 * time.Second},
+		},
 	}
 }
 
@@ -109,6 +129,14 @@ func (c *Config) Validate() error {
 	}
 	if c.Usage.RetentionDays < 0 {
 		return fmt.Errorf("config: invalid usage.retention_days %d", c.Usage.RetentionDays)
+	}
+	if c.Router.Breaker.FailureThreshold < 0 {
+		return fmt.Errorf("config: invalid router.breaker.failure_threshold %d",
+			c.Router.Breaker.FailureThreshold)
+	}
+	if c.Router.Breaker.Cooldown < 0 {
+		return fmt.Errorf("config: invalid router.breaker.cooldown %s",
+			c.Router.Breaker.Cooldown)
 	}
 	if c.Database.Path == "" {
 		return errors.New("config: database.path is required")

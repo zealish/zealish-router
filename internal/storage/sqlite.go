@@ -292,7 +292,7 @@ type sqliteProviders struct {
 	db *sql.DB
 }
 
-const providerColumns = `id, name, kind, base_url, api_key, timeout_ms, enabled, alias_prefix, provider_group, catalog_id, use_proxy_pool`
+const providerColumns = `id, name, kind, base_url, api_key, timeout_ms, enabled, alias_prefix, provider_group, catalog_id, use_proxy_pool, breaker_threshold, breaker_cooldown_ms`
 
 func (s *sqliteProviders) List(ctx context.Context) ([]Provider, error) {
 	rows, err := s.db.QueryContext(ctx,
@@ -332,9 +332,17 @@ func (s *sqliteProviders) Get(ctx context.Context, name string) (Provider, error
 
 // Put upserts by name, which is the identity clients address providers by.
 func (s *sqliteProviders) Put(ctx context.Context, p Provider) error {
+	var threshold, cooldownMS any
+	if p.BreakerThreshold != nil {
+		threshold = int64(*p.BreakerThreshold)
+	}
+	if p.BreakerCooldown != nil {
+		cooldownMS = p.BreakerCooldown.Milliseconds()
+	}
+
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO providers (`+providerColumns+`)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(name) DO UPDATE SET
 		   kind = excluded.kind,
 		   base_url = excluded.base_url,
@@ -344,9 +352,11 @@ func (s *sqliteProviders) Put(ctx context.Context, p Provider) error {
 		   alias_prefix = excluded.alias_prefix,
 		   provider_group = excluded.provider_group,
 		   catalog_id = excluded.catalog_id,
-		   use_proxy_pool = excluded.use_proxy_pool`,
+		   use_proxy_pool = excluded.use_proxy_pool,
+		   breaker_threshold = excluded.breaker_threshold,
+		   breaker_cooldown_ms = excluded.breaker_cooldown_ms`,
 		p.ID, p.Name, p.Kind, p.BaseURL, p.APIKey, p.Timeout.Milliseconds(), p.Enabled, p.AliasPrefix,
-		p.Group, p.CatalogID, p.UseProxyPool)
+		p.Group, p.CatalogID, p.UseProxyPool, threshold, cooldownMS)
 	if err != nil {
 		return fmt.Errorf("storage: put provider: %w", err)
 	}
@@ -466,14 +476,26 @@ func pruneFallbacks(ctx context.Context, tx *sql.Tx, dropped map[string]bool) er
 
 func scanProvider(src scanner) (Provider, error) {
 	var (
-		p         Provider
-		timeoutMS int64
+		p          Provider
+		timeoutMS  int64
+		threshold  sql.NullInt64
+		cooldownMS sql.NullInt64
 	)
 	if err := src.Scan(&p.ID, &p.Name, &p.Kind, &p.BaseURL, &p.APIKey, &timeoutMS, &p.Enabled,
-		&p.AliasPrefix, &p.Group, &p.CatalogID, &p.UseProxyPool); err != nil {
+		&p.AliasPrefix, &p.Group, &p.CatalogID, &p.UseProxyPool, &threshold, &cooldownMS); err != nil {
 		return Provider{}, err
 	}
 	p.Timeout = time.Duration(timeoutMS) * time.Millisecond
+	// NULL means "inherit the global policy", so the pointers stay nil rather
+	// than collapsing to a zero that would read as "breaker disabled".
+	if threshold.Valid {
+		v := int(threshold.Int64)
+		p.BreakerThreshold = &v
+	}
+	if cooldownMS.Valid {
+		d := time.Duration(cooldownMS.Int64) * time.Millisecond
+		p.BreakerCooldown = &d
+	}
 	return p, nil
 }
 

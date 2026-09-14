@@ -45,6 +45,7 @@ const maxChainAttempts = 8
 type Recorder interface {
 	RecordProviderError(provider, reason string)
 	RecordTokens(provider, model string, prompt, completion int)
+	RecordCircuitState(provider, state string)
 }
 
 // Route is a resolved alias target.
@@ -73,6 +74,7 @@ type Engine struct {
 	recorder Recorder
 	usage    storage.UsageStore
 	retry    Retry
+	breakers *breakers
 }
 
 // usageWriteTimeout bounds a single usage-log insert. It runs off the request's
@@ -86,9 +88,27 @@ func NewEngine(logger *slog.Logger, rec Recorder) *Engine {
 		logger:   logger,
 		recorder: rec,
 		retry:    DefaultRetry,
+		breakers: newBreakers(DefaultBreaker),
 	}
+	e.breakers.onTransition = e.onCircuitChange
 	e.Reload(nil, nil, provider.NewRegistry())
 	return e
+}
+
+// onCircuitChange logs and publishes a breaker transition. It runs under the
+// breaker's lock, so it only touches the logger and the recorder.
+func (e *Engine) onCircuitChange(providerName string, state CircuitState) {
+	switch state {
+	case CircuitOpen:
+		e.logger.Error("provider circuit opened", slog.String("provider", providerName))
+	case CircuitClosed:
+		e.logger.Info("provider circuit closed", slog.String("provider", providerName))
+	default:
+		e.logger.Warn("provider circuit probing", slog.String("provider", providerName))
+	}
+	if e.recorder != nil {
+		e.recorder.RecordCircuitState(providerName, string(state))
+	}
 }
 
 // SetUsageStore installs the durable usage log. A nil store disables usage
@@ -147,6 +167,13 @@ func (e *Engine) Combos() []string {
 // combo it reports the route its chain would try first.
 func (e *Engine) Resolve(name string) (Route, error) {
 	return e.routes.Load().resolve(name)
+}
+
+// Health reports the circuit state of every provider the engine has observed.
+// Providers that have never been called are absent: they are healthy by
+// definition, and the caller knows the full provider list already.
+func (e *Engine) Health() map[string]ProviderHealth {
+	return e.breakers.snapshot()
 }
 
 func (rt *routes) resolve(name string) (Route, error) {
@@ -280,6 +307,19 @@ func dispatch[T any](ctx context.Context, e *Engine, req *openai.ChatCompletionR
 			continue
 		}
 
+		// A provider whose circuit is open is skipped without a call: the
+		// whole point is not to pay its timeout again. The chain advances as
+		// if the route had failed.
+		if !e.breakers.allow(route.Provider) {
+			e.logger.Warn("skipping route with open circuit",
+				slog.String("requested", req.Model),
+				slog.String("alias", alias),
+				slog.String("provider", route.Provider))
+			e.record(route.Provider, "circuit_open")
+			lastErr = fmt.Errorf("%w: %s", ErrCircuitOpen, route.Provider)
+			continue
+		}
+
 		upstream := *req
 		upstream.Model = route.Model
 
@@ -321,9 +361,16 @@ func attempt[T any](ctx context.Context, e *Engine, route Route, call func() (T,
 	for i := 1; i <= attempts; i++ {
 		result, err := call()
 		if err == nil {
+			e.breakers.success(route.Provider)
 			return result, nil
 		}
 		lastErr = err
+
+		// Only transient upstream failures speak to provider health: a 4xx is
+		// the caller's fault and must never take a provider out of rotation.
+		if provider.Retryable(err) {
+			e.breakers.failure(route.Provider)
+		}
 
 		reason := classify(err)
 		e.record(route.Provider, reason)

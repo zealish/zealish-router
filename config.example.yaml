@@ -26,6 +26,20 @@ usage:
   # grows the database without bound on a busy gateway.
   retention_days: 90
 
+# Routing engine resilience.
+router:
+  # The circuit breaker takes a repeatedly failing provider out of rotation so
+  # a hard-down upstream is skipped instead of being retried until it times
+  # out. Individual providers can override both values from the Providers page.
+  breaker:
+    # Consecutive retryable failures (timeout, 429, 5xx, connection error)
+    # before the provider is skipped. 0 disables the breaker entirely.
+    # A terminal 4xx is the caller's fault and never counts.
+    failure_threshold: 5
+    # How long a tripped provider is skipped before one probe request is
+    # allowed through to test whether it recovered.
+    cooldown: 30s
+
 # The admin API is the dashboard's backend and can reconfigure routing, so it
 # ships disabled. Enable it with a token you generate yourself — anything
 # predictable here is a remote configuration hole.

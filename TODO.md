@@ -264,8 +264,15 @@ under `-race`, the dashboard lints and builds, and migrations were verified
 against the production database. Remaining: tag `v1.0.0`, then `v1.1.0`.
 
 Candidates for the next cycle, in the order they were recommended:
-- Provider circuit breaker — a hard-down provider is currently retried on every
-  request, paying the full timeout before fallback. Open/half-open state driven
-  by the existing `provider.Retryable` classifier, surfaced on the Providers page.
+- ~~Provider circuit breaker~~ — **done.** Per-provider breaker in
+  `internal/router/breaker.go`: consecutive `provider.Retryable` failures trip
+  the circuit, a cooldown then admits one half-open probe. An open circuit is
+  skipped without a call, so the chain advances instead of paying the timeout.
+  State survives reloads, is exposed as `circuit` on `GET /providers` and
+  `router_circuit_state`, and is badged on the Providers page. Terminal 4xx
+  never trips it. Tunable globally via `router.breaker` in `config.yaml`
+  (`failure_threshold`, `cooldown`), overridable per provider through
+  `breaker_threshold`/`breaker_cooldown_ms` (migration `0010`); null inherits
+  the global policy and 0 disables the breaker for that provider.
 - `POST /v1/embeddings` — the one commonly needed OpenAI endpoint still missing;
   reuses the alias, fallback and pricing machinery.

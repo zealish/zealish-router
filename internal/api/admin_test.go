@@ -729,3 +729,85 @@ func TestAdminUsageByKeyNamesUnattributedTraffic(t *testing.T) {
 		t.Errorf("row 1 = %+v, want unattributed traffic", rows[1])
 	}
 }
+
+func TestListProvidersReportsCircuitState(t *testing.T) {
+	h, _, _ := newAdminServer(t)
+
+	body := `{"group":"custom","kind":"openai","base_url":"https://api.example.com","api_key":"sk-test","timeout_ms":60000,"enabled":true,"alias_prefix":"acme/"}`
+	if rec := adminRequest(t, h, http.MethodPut, "/api/v1/providers/acme", body); rec.Code != http.StatusOK {
+		t.Fatalf("put provider: status %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	// A provider the engine has never dispatched to is healthy, not unknown.
+	rec := adminRequest(t, h, http.MethodGet, "/api/v1/providers", "")
+	providers := decodeJSON[[]providerResponse](t, rec)
+	if len(providers) != 1 {
+		t.Fatalf("got %d providers, want 1", len(providers))
+	}
+	if providers[0].Circuit != "closed" {
+		t.Errorf("circuit = %q, want %q", providers[0].Circuit, "closed")
+	}
+	if providers[0].CircuitRetryAt != "" {
+		t.Errorf("CircuitRetryAt = %q, want empty for a closed circuit", providers[0].CircuitRetryAt)
+	}
+}
+
+func TestPutProviderBreakerOverride(t *testing.T) {
+	h, store, _ := newAdminServer(t)
+
+	body := `{"group":"custom","kind":"openai","base_url":"https://api.example.com","api_key":"sk-test","timeout_ms":60000,"enabled":true,"breaker_threshold":2,"breaker_cooldown_ms":90000}`
+	rec := adminRequest(t, h, http.MethodPut, "/api/v1/providers/acme", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("put provider: status %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	resp := decodeJSON[providerResponse](t, rec)
+	if resp.BreakerThreshold == nil || *resp.BreakerThreshold != 2 {
+		t.Errorf("breaker_threshold = %v, want 2", resp.BreakerThreshold)
+	}
+	if resp.BreakerCooldownMS == nil || *resp.BreakerCooldownMS != 90000 {
+		t.Errorf("breaker_cooldown_ms = %v, want 90000", resp.BreakerCooldownMS)
+	}
+
+	stored, err := store.Providers().Get(t.Context(), "acme")
+	if err != nil {
+		t.Fatalf("get stored provider: %v", err)
+	}
+	if stored.BreakerThreshold == nil || *stored.BreakerThreshold != 2 {
+		t.Errorf("stored threshold = %v, want 2", stored.BreakerThreshold)
+	}
+}
+
+func TestPutProviderRejectsNegativeBreakerValues(t *testing.T) {
+	h, _, _ := newAdminServer(t)
+
+	for _, body := range []string{
+		`{"base_url":"https://api.example.com","enabled":true,"breaker_threshold":-1}`,
+		`{"base_url":"https://api.example.com","enabled":true,"breaker_cooldown_ms":-1}`,
+	} {
+		rec := adminRequest(t, h, http.MethodPut, "/api/v1/providers/acme", body)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("status = %d, want 400 for body %s", rec.Code, body)
+		}
+	}
+}
+
+func TestProviderWithoutOverrideReportsNull(t *testing.T) {
+	h, _, _ := newAdminServer(t)
+
+	adminRequest(t, h, http.MethodPut, "/api/v1/providers/plain",
+		`{"base_url":"https://api.example.com","enabled":true}`)
+
+	providers := decodeJSON[[]providerResponse](t,
+		adminRequest(t, h, http.MethodGet, "/api/v1/providers", ""))
+	if len(providers) != 1 {
+		t.Fatalf("got %d providers, want 1", len(providers))
+	}
+	// Null tells the dashboard to render "inherited", not a concrete number.
+	if providers[0].BreakerThreshold != nil {
+		t.Errorf("breaker_threshold = %v, want null", *providers[0].BreakerThreshold)
+	}
+	if providers[0].BreakerCooldownMS != nil {
+		t.Errorf("breaker_cooldown_ms = %v, want null", *providers[0].BreakerCooldownMS)
+	}
+}

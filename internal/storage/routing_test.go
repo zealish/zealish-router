@@ -247,3 +247,80 @@ func TestProviderDeleteCascades(t *testing.T) {
 		})
 	}
 }
+
+func TestProviderBreakerOverrideRoundTrip(t *testing.T) {
+	store := newTestStore(t)
+	ctx := t.Context()
+
+	threshold := 2
+	cooldown := 90 * time.Second
+	rec := Provider{
+		ID: "acme", Name: "acme", Kind: "openai", BaseURL: "https://acme.test/v1",
+		Timeout: 30 * time.Second, Enabled: true,
+		BreakerThreshold: &threshold, BreakerCooldown: &cooldown,
+	}
+	if err := store.Providers().Put(ctx, rec); err != nil {
+		t.Fatalf("put provider: %v", err)
+	}
+
+	got, err := store.Providers().Get(ctx, "acme")
+	if err != nil {
+		t.Fatalf("get provider: %v", err)
+	}
+	if got.BreakerThreshold == nil || *got.BreakerThreshold != 2 {
+		t.Errorf("BreakerThreshold = %v, want 2", got.BreakerThreshold)
+	}
+	if got.BreakerCooldown == nil || *got.BreakerCooldown != 90*time.Second {
+		t.Errorf("BreakerCooldown = %v, want 90s", got.BreakerCooldown)
+	}
+}
+
+func TestProviderWithoutBreakerOverrideInherits(t *testing.T) {
+	store := newTestStore(t)
+	ctx := t.Context()
+
+	// No override stored: the columns stay NULL so the provider inherits the
+	// global policy rather than reading as "breaker disabled".
+	rec := Provider{ID: "plain", Name: "plain", Kind: "openai",
+		BaseURL: "https://plain.test/v1", Timeout: 30 * time.Second, Enabled: true}
+	if err := store.Providers().Put(ctx, rec); err != nil {
+		t.Fatalf("put provider: %v", err)
+	}
+
+	got, err := store.Providers().Get(ctx, "plain")
+	if err != nil {
+		t.Fatalf("get provider: %v", err)
+	}
+	if got.BreakerThreshold != nil {
+		t.Errorf("BreakerThreshold = %v, want nil", *got.BreakerThreshold)
+	}
+	if got.BreakerCooldown != nil {
+		t.Errorf("BreakerCooldown = %v, want nil", *got.BreakerCooldown)
+	}
+}
+
+func TestProviderBreakerOverrideCanBeCleared(t *testing.T) {
+	store := newTestStore(t)
+	ctx := t.Context()
+
+	threshold := 7
+	base := Provider{ID: "acme", Name: "acme", Kind: "openai",
+		BaseURL: "https://acme.test/v1", Timeout: 30 * time.Second, Enabled: true}
+
+	withOverride := base
+	withOverride.BreakerThreshold = &threshold
+	if err := store.Providers().Put(ctx, withOverride); err != nil {
+		t.Fatalf("put with override: %v", err)
+	}
+	if err := store.Providers().Put(ctx, base); err != nil {
+		t.Fatalf("put without override: %v", err)
+	}
+
+	got, err := store.Providers().Get(ctx, "acme")
+	if err != nil {
+		t.Fatalf("get provider: %v", err)
+	}
+	if got.BreakerThreshold != nil {
+		t.Errorf("BreakerThreshold = %v, want nil after clearing", *got.BreakerThreshold)
+	}
+}

@@ -21,6 +21,7 @@ type Metrics struct {
 	ProviderErrorsTotal *prometheus.CounterVec
 	StreamConnections   prometheus.Gauge
 	TokensTotal         *prometheus.CounterVec
+	CircuitState        *prometheus.GaugeVec
 }
 
 // New creates collectors and registers them on a fresh registry.
@@ -54,6 +55,10 @@ func New() *Metrics {
 			Name: "router_tokens_total",
 			Help: "Total number of tokens processed.",
 		}, []string{"provider", "model", "kind"}),
+		CircuitState: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "router_circuit_state",
+			Help: "Provider circuit breaker state: 0 closed, 1 half-open, 2 open.",
+		}, []string{"provider"}),
 	}
 
 	reg.MustRegister(
@@ -62,6 +67,7 @@ func New() *Metrics {
 		m.ProviderErrorsTotal,
 		m.StreamConnections,
 		m.TokensTotal,
+		m.CircuitState,
 	)
 	return m
 }
@@ -69,6 +75,24 @@ func New() *Metrics {
 // RecordProviderError counts one upstream failure for a provider.
 func (m *Metrics) RecordProviderError(provider, reason string) {
 	m.ProviderErrorsTotal.WithLabelValues(provider, reason).Inc()
+}
+
+// Circuit breaker gauge values, ordered by severity so alerting can threshold
+// on them. They mirror router.CircuitState.
+var circuitValues = map[string]float64{
+	"closed":    0,
+	"half_open": 1,
+	"open":      2,
+}
+
+// RecordCircuitState publishes a provider's breaker phase. An unknown state is
+// ignored rather than reported as healthy.
+func (m *Metrics) RecordCircuitState(provider, state string) {
+	value, ok := circuitValues[state]
+	if !ok {
+		return
+	}
+	m.CircuitState.WithLabelValues(provider).Set(value)
 }
 
 // Token accounting kinds, used as the "kind" label of router_tokens_total.
