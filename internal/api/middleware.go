@@ -106,6 +106,42 @@ func authenticate(a auth.Authenticator) func(http.Handler) http.Handler {
 	}
 }
 
+// enforceQuota applies the authenticated key's rate limit and monthly budget.
+// It runs after authenticate, which is what puts the identity — and with it
+// the quota figures — into the request context.
+func enforceQuota(q *auth.Quota) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			identity, ok := auth.FromContext(r.Context())
+			if !ok {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			remaining, err := q.Allow(r.Context(), identity)
+			if identity.RateLimitPerMin > 0 {
+				h := w.Header()
+				h.Set("X-RateLimit-Limit", strconv.Itoa(identity.RateLimitPerMin))
+				h.Set("X-RateLimit-Remaining", strconv.Itoa(remaining))
+			}
+
+			switch {
+			case errors.Is(err, auth.ErrRateLimited):
+				// The window slides, so a slot frees up within a minute.
+				w.Header().Set("Retry-After", "60")
+				writeError(w, http.StatusTooManyRequests, "rate_limit_error",
+					"Rate limit exceeded for this API key.")
+				return
+			case errors.Is(err, auth.ErrBudgetExceeded):
+				writeError(w, http.StatusTooManyRequests, "insufficient_quota",
+					"Monthly budget exhausted for this API key.")
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // cors allows the dashboard, which runs on its own origin, to call the admin
 // API from a browser. Only explicitly configured origins are echoed back; the
 // wildcard is never used because these requests carry credentials.

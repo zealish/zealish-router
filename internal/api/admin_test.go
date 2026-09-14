@@ -42,6 +42,7 @@ func newAdminServer(t *testing.T) (http.Handler, storage.Store, *router.Engine) 
 		Store:     store,
 		Auth:      auth.NewService(false, nil, nil, logger),
 		AdminAuth: auth.NewAdminService(true, adminToken),
+		Quota:     auth.NewQuota(store.Usage()),
 		Metrics:   collector,
 		Logger:    logger,
 	}
@@ -644,5 +645,87 @@ func TestAdminTestAliasUnknown(t *testing.T) {
 
 	if got := adminRequest(t, h, http.MethodPost, "/api/v1/models/ghost/test", `{}`).Code; got != http.StatusNotFound {
 		t.Errorf("status = %d, want 404 for an unknown alias", got)
+	}
+}
+
+func TestAdminKeyQuotaLifecycle(t *testing.T) {
+	h, store, _ := newAdminServer(t)
+	ctx := context.Background()
+
+	created := decodeJSON[createKeyResponse](t,
+		adminRequest(t, h, http.MethodPost, "/api/v1/keys",
+			`{"name":"agent","rate_limit_per_min":30,"monthly_budget_usd":12.5}`))
+	if created.RateLimitPerMin != 30 || created.MonthlyBudgetUSD != 12.5 {
+		t.Fatalf("created = %+v, want the quotas from the request", created)
+	}
+
+	// Usage recorded for the key shows up on the list, split into lifetime
+	// cost and current-month spend.
+	if err := store.Usage().Record(ctx, storage.UsageEvent{
+		CreatedAt: time.Now().UTC(), KeyID: created.ID, Alias: "a",
+		Provider: "p", Model: "m", Status: "ok",
+		PromptTokens: 100, CompletionTokens: 20, CostUSD: 2,
+	}); err != nil {
+		t.Fatalf("record usage: %v", err)
+	}
+
+	keys := decodeJSON[[]apiKeyResponse](t, adminRequest(t, h, http.MethodGet, "/api/v1/keys", ""))
+	if len(keys) != 1 {
+		t.Fatalf("listed %d keys, want 1", len(keys))
+	}
+	if keys[0].Requests != 1 || keys[0].CostUSD != 2 || keys[0].MonthSpendUSD != 2 {
+		t.Errorf("key usage = %+v, want 1 request costing 2 this month", keys[0])
+	}
+	if keys[0].TokensIn != 100 || keys[0].TokensOut != 20 {
+		t.Errorf("key tokens = %d/%d, want 100/20", keys[0].TokensIn, keys[0].TokensOut)
+	}
+
+	// Updating quotas persists.
+	path := "/api/v1/keys/" + created.ID + "/quota"
+	if got := adminRequest(t, h, http.MethodPut, path, `{"rate_limit_per_min":5,"monthly_budget_usd":0}`).Code; got != http.StatusNoContent {
+		t.Fatalf("put quota status = %d, want 204", got)
+	}
+	keys = decodeJSON[[]apiKeyResponse](t, adminRequest(t, h, http.MethodGet, "/api/v1/keys", ""))
+	if keys[0].RateLimitPerMin != 5 || keys[0].MonthlyBudgetUSD != 0 {
+		t.Errorf("quotas = %d/%v, want 5/0", keys[0].RateLimitPerMin, keys[0].MonthlyBudgetUSD)
+	}
+
+	// Negative values are rejected, and an unknown key is a 404.
+	if got := adminRequest(t, h, http.MethodPut, path, `{"rate_limit_per_min":-1}`).Code; got != http.StatusBadRequest {
+		t.Errorf("negative rate limit status = %d, want 400", got)
+	}
+	if got := adminRequest(t, h, http.MethodPut, "/api/v1/keys/nope/quota", `{"rate_limit_per_min":1}`).Code; got != http.StatusNotFound {
+		t.Errorf("unknown key status = %d, want 404", got)
+	}
+}
+
+func TestAdminUsageByKeyNamesUnattributedTraffic(t *testing.T) {
+	h, store, _ := newAdminServer(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	created := decodeJSON[createKeyResponse](t,
+		adminRequest(t, h, http.MethodPost, "/api/v1/keys", `{"name":"agent"}`))
+
+	for _, e := range []storage.UsageEvent{
+		{CreatedAt: now, KeyID: created.ID, Alias: "a", Provider: "p", Model: "m", Status: "ok", CostUSD: 3},
+		{CreatedAt: now, Alias: "a", Provider: "p", Model: "m", Status: "ok", CostUSD: 1},
+	} {
+		if err := store.Usage().Record(ctx, e); err != nil {
+			t.Fatalf("record usage: %v", err)
+		}
+	}
+
+	rows := decodeJSON[[]keyUsageResponse](t,
+		adminRequest(t, h, http.MethodGet, "/api/v1/usage/keys?hours=24", ""))
+	if len(rows) != 2 {
+		t.Fatalf("got %d rows, want 2", len(rows))
+	}
+	// Rows are ranked by spend, so the named key leads.
+	if rows[0].Name != "agent" || rows[0].CostUSD != 3 {
+		t.Errorf("row 0 = %+v, want the agent key at 3", rows[0])
+	}
+	if rows[1].Name != "unattributed" || rows[1].KeyID != "" {
+		t.Errorf("row 1 = %+v, want unattributed traffic", rows[1])
 	}
 }

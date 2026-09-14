@@ -22,6 +22,11 @@ type APIKey struct {
 	Enabled    bool
 	CreatedAt  time.Time
 	LastUsedAt time.Time
+	// RateLimitPerMin caps requests per rolling minute. 0 means unlimited.
+	RateLimitPerMin int
+	// MonthlyBudgetUSD caps spend in the current calendar month. 0 means
+	// unlimited.
+	MonthlyBudgetUSD float64
 }
 
 // Provider is an upstream endpoint configuration.
@@ -88,6 +93,8 @@ type APIKeyStore interface {
 	GetByHash(ctx context.Context, hash string) (APIKey, error)
 	List(ctx context.Context) ([]APIKey, error)
 	TouchLastUsed(ctx context.Context, id string, at time.Time) error
+	// SetQuota replaces the rate limit and monthly budget of one key.
+	SetQuota(ctx context.Context, id string, perMin int, budgetUSD float64) error
 	Delete(ctx context.Context, id string) error
 }
 
@@ -131,8 +138,12 @@ type SettingStore interface {
 
 // UsageEvent is one completed chat request, priced at the time it finished.
 type UsageEvent struct {
-	ID               int64
-	CreatedAt        time.Time
+	ID        int64
+	CreatedAt time.Time
+	// KeyID attributes the request to the API key that authenticated it.
+	// Empty means unattributed: auth disabled, a static key, or a row written
+	// before per-key attribution existed.
+	KeyID            string
 	Alias            string
 	Provider         string
 	Model            string
@@ -178,6 +189,17 @@ type ModelUsage struct {
 	LastUsed         time.Time
 }
 
+// KeyUsage aggregates usage for one API key over a window.
+type KeyUsage struct {
+	KeyID            string
+	Requests         int
+	PromptTokens     int
+	CompletionTokens int
+	CachedTokens     int
+	CostUSD          float64
+	LastUsed         time.Time
+}
+
 // LeaderboardSort selects the metric a usage leaderboard is ranked by.
 type LeaderboardSort string
 
@@ -195,6 +217,13 @@ type UsageStore interface {
 	Series(ctx context.Context, since time.Time, bucket time.Duration) ([]UsageBucket, error)
 	ByModel(ctx context.Context) ([]ModelUsage, error)
 	Leaderboard(ctx context.Context, since time.Time, limit int, sortBy LeaderboardSort) ([]ModelUsage, error)
+	// ByKey aggregates usage per API key since a point in time.
+	ByKey(ctx context.Context, since time.Time) ([]KeyUsage, error)
+	// KeySpend totals one key's cost since a point in time. It backs the
+	// budget check on the request path, so it stays a single narrow read.
+	KeySpend(ctx context.Context, keyID string, since time.Time) (float64, error)
+	// Prune deletes events older than a cutoff and reports how many went.
+	Prune(ctx context.Context, before time.Time) (int64, error)
 }
 
 // Store aggregates every persistence contract of the application.
@@ -301,6 +330,19 @@ func (s *memoryAPIKeys) TouchLastUsed(_ context.Context, id string, at time.Time
 		return ErrNotFound
 	}
 	key.LastUsedAt = at
+	s.items[id] = key
+	return nil
+}
+
+func (s *memoryAPIKeys) SetQuota(_ context.Context, id string, perMin int, budgetUSD float64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key, ok := s.items[id]
+	if !ok {
+		return ErrNotFound
+	}
+	key.RateLimitPerMin = perMin
+	key.MonthlyBudgetUSD = budgetUSD
 	s.items[id] = key
 	return nil
 }
@@ -744,4 +786,66 @@ func (s *memoryUsage) Leaderboard(_ context.Context, since time.Time, limit int,
 		out = out[:limit]
 	}
 	return out, nil
+}
+
+func (s *memoryUsage) ByKey(_ context.Context, since time.Time) ([]KeyUsage, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	byKey := map[string]*KeyUsage{}
+	for _, e := range s.events {
+		if e.CreatedAt.Before(since) {
+			continue
+		}
+		k, ok := byKey[e.KeyID]
+		if !ok {
+			k = &KeyUsage{KeyID: e.KeyID}
+			byKey[e.KeyID] = k
+		}
+		k.Requests++
+		k.PromptTokens += e.PromptTokens
+		k.CompletionTokens += e.CompletionTokens
+		k.CachedTokens += e.CachedTokens
+		k.CostUSD += e.CostUSD
+		if e.CreatedAt.After(k.LastUsed) {
+			k.LastUsed = e.CreatedAt
+		}
+	}
+
+	out := make([]KeyUsage, 0, len(byKey))
+	for _, k := range byKey {
+		out = append(out, *k)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CostUSD > out[j].CostUSD })
+	return out, nil
+}
+
+func (s *memoryUsage) KeySpend(_ context.Context, keyID string, since time.Time) (float64, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var total float64
+	for _, e := range s.events {
+		if e.KeyID == keyID && !e.CreatedAt.Before(since) {
+			total += e.CostUSD
+		}
+	}
+	return total, nil
+}
+
+func (s *memoryUsage) Prune(_ context.Context, before time.Time) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	kept := s.events[:0]
+	var removed int64
+	for _, e := range s.events {
+		if e.CreatedAt.Before(before) {
+			removed++
+			continue
+		}
+		kept = append(kept, e)
+	}
+	s.events = kept
+	return removed, nil
 }

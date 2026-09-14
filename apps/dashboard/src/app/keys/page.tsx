@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { toast } from "sonner";
-import { Check, Copy, Trash2 } from "lucide-react";
+import { Check, Copy, Gauge, Trash2 } from "lucide-react";
 import type { ColumnDef } from "@tanstack/react-table";
 import {
   DataTable,
@@ -38,6 +38,9 @@ export default function KeysPage() {
   const [name, setName] = useState<string>();
   const [created, setCreated] = useState<CreatedApiKey>();
   const [saving, setSaving] = useState(false);
+  const [quotaKey, setQuotaKey] = useState<ApiKey>();
+  const [perMin, setPerMin] = useState("0");
+  const [budget, setBudget] = useState("0");
 
   const create = async () => {
     if (!name) return;
@@ -61,6 +64,30 @@ export default function KeysPage() {
       await reload();
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : String(err));
+    }
+  };
+
+  const openQuota = (key: ApiKey) => {
+    setPerMin(String(key.rate_limit_per_min));
+    setBudget(String(key.monthly_budget_usd));
+    setQuotaKey(key);
+  };
+
+  const saveQuota = async () => {
+    if (!quotaKey) return;
+    setSaving(true);
+    try {
+      await api.put(`/keys/${encodeURIComponent(quotaKey.id)}/quota`, {
+        rate_limit_per_min: Number(perMin) || 0,
+        monthly_budget_usd: Number(budget) || 0,
+      });
+      toast.success(`Updated limits for '${quotaKey.name}'.`);
+      setQuotaKey(undefined);
+      await reload();
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : String(err));
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -113,12 +140,71 @@ export default function KeysPage() {
         ),
     },
     {
+      accessorKey: "requests",
+      header: ({ column }) => (
+        <DataTableColumnHeader column={column} title="Requests" />
+      ),
+      cell: ({ row }) => (
+        <span className="tabular-nums">
+          {row.original.requests.toLocaleString()}
+        </span>
+      ),
+    },
+    {
+      accessorKey: "cost_usd",
+      header: ({ column }) => (
+        <DataTableColumnHeader column={column} title="Total cost" />
+      ),
+      cell: ({ row }) => (
+        <span className="tabular-nums">{formatCost(row.original.cost_usd)}</span>
+      ),
+    },
+    {
+      id: "budget",
+      accessorFn: (key) => key.month_spend_usd,
+      header: ({ column }) => (
+        <DataTableColumnHeader column={column} title="This month" />
+      ),
+      cell: ({ row }) => {
+        const { month_spend_usd: spent, monthly_budget_usd: budget } =
+          row.original;
+        if (!budget) {
+          return <span className="tabular-nums">{formatCost(spent)}</span>;
+        }
+        return (
+          <span
+            className={`tabular-nums ${spent >= budget ? "text-destructive" : ""}`}
+          >
+            {formatCost(spent)} / {formatCost(budget)}
+          </span>
+        );
+      },
+    },
+    {
+      accessorKey: "rate_limit_per_min",
+      header: ({ column }) => (
+        <DataTableColumnHeader column={column} title="Rate limit" />
+      ),
+      cell: ({ row }) =>
+        row.original.rate_limit_per_min ? (
+          <span className="tabular-nums">
+            {row.original.rate_limit_per_min}/min
+          </span>
+        ) : (
+          <span className="text-muted-foreground text-xs">unlimited</span>
+        ),
+    },
+    {
       id: "actions",
       header: "",
       enableSorting: false,
       meta: { className: "text-right" },
       cell: ({ row }) => (
         <DataTableRowActions>
+          <DropdownMenuItem onSelect={() => openQuota(row.original)}>
+            <Gauge />
+            Edit limits
+          </DropdownMenuItem>
           <DropdownMenuItem
             variant="destructive"
             onSelect={() => remove(row.original)}
@@ -228,8 +314,73 @@ export default function KeysPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <Dialog
+        open={quotaKey !== undefined}
+        onOpenChange={(open) => !open && setQuotaKey(undefined)}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Limits for {quotaKey?.name}</DialogTitle>
+            <DialogDescription>
+              Zero means unlimited. The budget resets at the start of each
+              calendar month.
+            </DialogDescription>
+          </DialogHeader>
+          <form
+            id="quota-form"
+            className="space-y-4"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void saveQuota();
+            }}
+          >
+            <div className="space-y-2">
+              <Label htmlFor="quota-rate">Requests per minute</Label>
+              <Input
+                id="quota-rate"
+                type="number"
+                min={0}
+                step={1}
+                value={perMin}
+                onChange={(e) => setPerMin(e.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="quota-budget">Monthly budget (USD)</Label>
+              <Input
+                id="quota-budget"
+                type="number"
+                min={0}
+                step="0.01"
+                value={budget}
+                onChange={(e) => setBudget(e.target.value)}
+              />
+            </div>
+          </form>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              type="button"
+              onClick={() => setQuotaKey(undefined)}
+            >
+              Cancel
+            </Button>
+            <Button type="submit" form="quota-form" disabled={saving}>
+              Save
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   );
+}
+
+/** Sub-cent costs need more precision than a currency formatter gives. */
+function formatCost(usd: number): string {
+  if (usd === 0) return "$0.00";
+  if (usd < 0.01) return `$${usd.toFixed(4)}`;
+  return `$${usd.toFixed(2)}`;
 }
 
 const ENDPOINTS = [

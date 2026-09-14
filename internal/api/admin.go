@@ -28,6 +28,7 @@ type adminHandler struct {
 	store   storage.Store
 	loader  *router.Loader
 	metrics *metrics.Metrics
+	quota   *auth.Quota
 	logger  *slog.Logger
 }
 
@@ -36,6 +37,7 @@ func newAdminHandler(deps Dependencies) *adminHandler {
 		store:   deps.Store,
 		loader:  deps.Loader,
 		metrics: deps.Metrics,
+		quota:   deps.Quota,
 		logger:  deps.Logger,
 	}
 }
@@ -46,10 +48,12 @@ func (h *adminHandler) routes(r chi.Router) {
 	r.Get("/usage/recent", h.usageRecent)
 	r.Get("/usage/models", h.usageByModel)
 	r.Get("/usage/leaderboard", h.usageLeaderboard)
+	r.Get("/usage/keys", h.usageByKey)
 
 	r.Get("/keys", h.listKeys)
 	r.Post("/keys", h.createKey)
 	r.Delete("/keys/{id}", h.deleteKey)
+	r.Put("/keys/{id}/quota", h.putKeyQuota)
 
 	r.Get("/provider-catalog", h.providerCatalogPresets)
 	r.Get("/providers", h.listProviders)
@@ -166,10 +170,31 @@ type apiKeyResponse struct {
 	Enabled    bool       `json:"enabled"`
 	CreatedAt  time.Time  `json:"created_at"`
 	LastUsedAt *time.Time `json:"last_used_at"`
+
+	// Quotas. Zero means unlimited on either field.
+	RateLimitPerMin  int     `json:"rate_limit_per_min"`
+	MonthlyBudgetUSD float64 `json:"monthly_budget_usd"`
+
+	// Spend so far in the current calendar month, against the budget above.
+	MonthSpendUSD float64 `json:"month_spend_usd"`
+
+	// Lifetime usage attributed to this key.
+	Requests  int     `json:"requests"`
+	TokensIn  int     `json:"tokens_in"`
+	TokensOut int     `json:"tokens_out"`
+	CostUSD   float64 `json:"cost_usd"`
 }
 
 type createKeyRequest struct {
-	Name string `json:"name"`
+	Name             string  `json:"name"`
+	RateLimitPerMin  int     `json:"rate_limit_per_min"`
+	MonthlyBudgetUSD float64 `json:"monthly_budget_usd"`
+}
+
+// quotaRequest updates the limits of an existing key.
+type quotaRequest struct {
+	RateLimitPerMin  int     `json:"rate_limit_per_min"`
+	MonthlyBudgetUSD float64 `json:"monthly_budget_usd"`
 }
 
 type createKeyResponse struct {
@@ -179,17 +204,50 @@ type createKeyResponse struct {
 }
 
 func (h *adminHandler) listKeys(w http.ResponseWriter, r *http.Request) {
-	keys, err := h.store.APIKeys().List(r.Context())
+	ctx := r.Context()
+	keys, err := h.store.APIKeys().List(ctx)
 	if err != nil {
 		h.fail(w, err)
 		return
 	}
 
+	// Lifetime usage and current-month spend are joined in by key id. A usage
+	// read failure degrades to zeroed counters rather than failing the list.
+	lifetime := map[string]storage.KeyUsage{}
+	if rows, err := h.store.Usage().ByKey(ctx, time.Time{}); err == nil {
+		for _, row := range rows {
+			lifetime[row.KeyID] = row
+		}
+	} else {
+		h.logger.Warn("key usage unavailable", slog.Any("error", err))
+	}
+	month := map[string]storage.KeyUsage{}
+	if rows, err := h.store.Usage().ByKey(ctx, monthStart(time.Now())); err == nil {
+		for _, row := range rows {
+			month[row.KeyID] = row
+		}
+	}
+
 	out := make([]apiKeyResponse, 0, len(keys))
 	for _, k := range keys {
-		out = append(out, toAPIKeyResponse(k))
+		resp := toAPIKeyResponse(k)
+		if u, ok := lifetime[k.ID]; ok {
+			resp.Requests = u.Requests
+			resp.TokensIn = u.PromptTokens
+			resp.TokensOut = u.CompletionTokens
+			resp.CostUSD = u.CostUSD
+		}
+		resp.MonthSpendUSD = month[k.ID].CostUSD
+		out = append(out, resp)
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// monthStart is the first instant of the calendar month containing t, in UTC.
+// Budgets reset on that boundary.
+func monthStart(t time.Time) time.Time {
+	t = t.UTC()
+	return time.Date(t.Year(), t.Month(), 1, 0, 0, 0, 0, time.UTC)
 }
 
 func (h *adminHandler) createKey(w http.ResponseWriter, r *http.Request) {
@@ -207,6 +265,8 @@ func (h *adminHandler) createKey(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, err)
 		return
 	}
+	generated.Record.RateLimitPerMin = req.RateLimitPerMin
+	generated.Record.MonthlyBudgetUSD = req.MonthlyBudgetUSD
 	if err := h.store.APIKeys().Create(r.Context(), generated.Record); err != nil {
 		h.fail(w, err)
 		return
@@ -218,19 +278,45 @@ func (h *adminHandler) createKey(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *adminHandler) deleteKey(w http.ResponseWriter, r *http.Request) {
-	if err := h.store.APIKeys().Delete(r.Context(), urlParam(r, "id")); err != nil {
+	id := urlParam(r, "id")
+	if err := h.store.APIKeys().Delete(r.Context(), id); err != nil {
 		h.fail(w, err)
 		return
 	}
+	h.quota.Forget(id)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *adminHandler) putKeyQuota(w http.ResponseWriter, r *http.Request) {
+	var req quotaRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	if req.RateLimitPerMin < 0 || req.MonthlyBudgetUSD < 0 {
+		writeError(w, http.StatusBadRequest, "invalid_request_error",
+			"Quota values must not be negative.")
+		return
+	}
+	id := urlParam(r, "id")
+	if err := h.store.APIKeys().SetQuota(r.Context(), id,
+		req.RateLimitPerMin, req.MonthlyBudgetUSD); err != nil {
+		h.fail(w, err)
+		return
+	}
+	// The new limits must apply to the next request, not after the cached
+	// window and spend total expire.
+	h.quota.Forget(id)
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func toAPIKeyResponse(k storage.APIKey) apiKeyResponse {
 	resp := apiKeyResponse{
-		ID:        k.ID,
-		Name:      k.Name,
-		Enabled:   k.Enabled,
-		CreatedAt: k.CreatedAt,
+		ID:               k.ID,
+		Name:             k.Name,
+		Enabled:          k.Enabled,
+		CreatedAt:        k.CreatedAt,
+		RateLimitPerMin:  k.RateLimitPerMin,
+		MonthlyBudgetUSD: k.MonthlyBudgetUSD,
 	}
 	if !k.LastUsedAt.IsZero() {
 		used := k.LastUsedAt
@@ -1268,6 +1354,59 @@ func (h *adminHandler) usageLeaderboard(w http.ResponseWriter, r *http.Request) 
 			TotalTokens:      m.PromptTokens + m.CompletionTokens,
 			CostUSD:          m.CostUSD,
 			LastUsed:         m.LastUsed.Format(time.RFC3339),
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+type keyUsageResponse struct {
+	KeyID            string  `json:"key_id"`
+	Name             string  `json:"name"`
+	Requests         int     `json:"requests"`
+	PromptTokens     int     `json:"prompt_tokens"`
+	CompletionTokens int     `json:"completion_tokens"`
+	CachedTokens     int     `json:"cached_tokens"`
+	TotalTokens      int     `json:"total_tokens"`
+	CostUSD          float64 `json:"cost_usd"`
+	LastUsed         string  `json:"last_used"`
+}
+
+// usageByKey ranks API keys by spend inside the requested window. Events with
+// no key id are reported under an empty id as unattributed traffic.
+func (h *adminHandler) usageByKey(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	window, _ := usageWindow(r)
+
+	rows, err := h.store.Usage().ByKey(ctx, time.Now().Add(-window))
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+
+	// Names come from the key store; a deleted key keeps its usage rows.
+	names := map[string]string{}
+	if keys, err := h.store.APIKeys().List(ctx); err == nil {
+		for _, k := range keys {
+			names[k.ID] = k.Name
+		}
+	}
+
+	out := make([]keyUsageResponse, 0, len(rows))
+	for _, u := range rows {
+		name := names[u.KeyID]
+		if name == "" {
+			name = "unattributed"
+		}
+		out = append(out, keyUsageResponse{
+			KeyID:            u.KeyID,
+			Name:             name,
+			Requests:         u.Requests,
+			PromptTokens:     u.PromptTokens,
+			CompletionTokens: u.CompletionTokens,
+			CachedTokens:     u.CachedTokens,
+			TotalTokens:      u.PromptTokens + u.CompletionTokens,
+			CostUSD:          u.CostUSD,
+			LastUsed:         u.LastUsed.Format(time.RFC3339),
 		})
 	}
 	writeJSON(w, http.StatusOK, out)

@@ -224,13 +224,13 @@ func (rt *routes) entrypoints(name string) []string {
 // ChatCompletion routes a non-streaming completion request, advancing through
 // the fallback chain on retryable upstream failures.
 func (e *Engine) ChatCompletion(ctx context.Context, req *openai.ChatCompletionRequest) (*openai.ChatCompletionResponse, error) {
-	started := time.Now()
-	return dispatch(ctx, e, req, false, started, func(p provider.Provider, route Route, upstream *openai.ChatCompletionRequest) (*openai.ChatCompletionResponse, error) {
+	meta := metaFrom(ctx, time.Now())
+	return dispatch(ctx, e, req, false, meta, func(p provider.Provider, route Route, upstream *openai.ChatCompletionRequest) (*openai.ChatCompletionResponse, error) {
 		resp, err := p.ChatCompletion(ctx, upstream)
 		if err != nil {
 			return nil, err
 		}
-		e.recordUsage(route, usageOf(resp.Usage, upstream, resp.Choices), false, started)
+		e.recordUsage(route, usageOf(resp.Usage, upstream, resp.Choices), false, meta)
 		return resp, nil
 	})
 }
@@ -239,13 +239,13 @@ func (e *Engine) ChatCompletion(ctx context.Context, req *openai.ChatCompletionR
 // only while establishing the stream: once the channel is handed back the first
 // chunk may already be in flight, so the response is committed.
 func (e *Engine) ChatCompletionStream(ctx context.Context, req *openai.ChatCompletionRequest) (<-chan openai.StreamChunk, error) {
-	started := time.Now()
-	return dispatch(ctx, e, req, true, started, func(p provider.Provider, route Route, upstream *openai.ChatCompletionRequest) (<-chan openai.StreamChunk, error) {
+	meta := metaFrom(ctx, time.Now())
+	return dispatch(ctx, e, req, true, meta, func(p provider.Provider, route Route, upstream *openai.ChatCompletionRequest) (<-chan openai.StreamChunk, error) {
 		chunks, err := p.ChatCompletionStream(ctx, upstream)
 		if err != nil {
 			return nil, err
 		}
-		return e.meterStream(ctx, route, upstream, chunks, started), nil
+		return e.meterStream(ctx, route, upstream, chunks, meta), nil
 	})
 }
 
@@ -253,7 +253,7 @@ func (e *Engine) ChatCompletionStream(ctx context.Context, req *openai.ChatCompl
 // according to the engine policy, and returns the first successful result.
 // A request that fails after reaching at least one provider is appended to the
 // usage log with its failure class so totals count every hit on a model.
-func dispatch[T any](ctx context.Context, e *Engine, req *openai.ChatCompletionRequest, streamed bool, started time.Time, call func(provider.Provider, Route, *openai.ChatCompletionRequest) (T, error)) (T, error) {
+func dispatch[T any](ctx context.Context, e *Engine, req *openai.ChatCompletionRequest, streamed bool, meta callMeta, call func(provider.Provider, Route, *openai.ChatCompletionRequest) (T, error)) (T, error) {
 	var zero T
 
 	// Pin one snapshot for the whole walk: a reload mid-chain must not move
@@ -292,11 +292,11 @@ func dispatch[T any](ctx context.Context, e *Engine, req *openai.ChatCompletionR
 		lastErr = err
 
 		if !provider.Retryable(err) {
-			e.recordFailure(route, streamed, classify(err), started)
+			e.recordFailure(route, streamed, classify(err), meta)
 			return zero, err
 		}
 		if ctx.Err() != nil {
-			e.recordFailure(route, streamed, classify(ctx.Err()), started)
+			e.recordFailure(route, streamed, classify(ctx.Err()), meta)
 			return zero, ctx.Err()
 		}
 	}
@@ -305,7 +305,7 @@ func dispatch[T any](ctx context.Context, e *Engine, req *openai.ChatCompletionR
 		return zero, fmt.Errorf("%w: %s", ErrUnknownModel, req.Model)
 	}
 	if attempted {
-		e.recordFailure(lastRoute, streamed, classify(lastErr), started)
+		e.recordFailure(lastRoute, streamed, classify(lastErr), meta)
 	}
 	return zero, fmt.Errorf("%w: %w", ErrChainExhausted, lastErr)
 }

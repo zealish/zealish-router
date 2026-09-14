@@ -20,6 +20,7 @@ type Config struct {
 	Server   Server   `yaml:"server"`
 	Database Database `yaml:"database"`
 	Auth     Auth     `yaml:"auth"`
+	Usage    Usage    `yaml:"usage"`
 	Admin    Admin    `yaml:"admin"`
 }
 
@@ -48,6 +49,13 @@ type Database struct {
 type Auth struct {
 	Enabled bool     `yaml:"enabled"`
 	APIKeys []string `yaml:"api_keys"`
+}
+
+// Usage configures the durable request log.
+type Usage struct {
+	// RetentionDays deletes usage events older than this many days. 0 keeps
+	// every event forever, which is the pre-1.1 behaviour.
+	RetentionDays int `yaml:"retention_days"`
 }
 
 // Admin configures the internal REST API used by the dashboard.
@@ -98,6 +106,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Server.MaxBodyBytes < 0 {
 		return fmt.Errorf("config: invalid server.max_body_bytes %d", c.Server.MaxBodyBytes)
+	}
+	if c.Usage.RetentionDays < 0 {
+		return fmt.Errorf("config: invalid usage.retention_days %d", c.Usage.RetentionDays)
 	}
 	if c.Database.Path == "" {
 		return errors.New("config: database.path is required")

@@ -194,6 +194,11 @@ func serve(cfg *config.Config, configPath string, logger *slog.Logger) error {
 	defer func() { _ = store.Close() }()
 	logger.Info("database ready", slog.String("path", cfg.Database.Path))
 
+	// Retention runs for the lifetime of the process; ctx cancellation on
+	// shutdown stops it.
+	go storage.PruneUsage(ctx, store.Usage(),
+		time.Duration(cfg.Usage.RetentionDays)*24*time.Hour, logger)
+
 	collector := metrics.New()
 	engine := router.NewEngine(logger, collector)
 	engine.SetUsageStore(store.Usage())
@@ -204,6 +209,7 @@ func serve(cfg *config.Config, configPath string, logger *slog.Logger) error {
 
 	authenticator := auth.NewService(cfg.Auth.Enabled, cfg.Auth.APIKeys, store.APIKeys(), logger)
 	adminAuth := auth.NewAdminService(cfg.Admin.Enabled, cfg.Admin.Token)
+	quota := auth.NewQuota(store.Usage())
 
 	server := api.NewServer(api.Dependencies{
 		Config:    cfg,
@@ -212,6 +218,7 @@ func serve(cfg *config.Config, configPath string, logger *slog.Logger) error {
 		Store:     store,
 		Auth:      authenticator,
 		AdminAuth: adminAuth,
+		Quota:     quota,
 		Metrics:   collector,
 		Logger:    logger,
 	})

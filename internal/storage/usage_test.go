@@ -172,3 +172,96 @@ func TestUsageSeriesRejectsNonPositiveBucket(t *testing.T) {
 		t.Errorf("series = %v, want nil for a zero bucket", series)
 	}
 }
+
+func TestUsagePruneDropsOnlyRowsBeforeCutoff(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	old := sampleUsage(now.Add(-72*time.Hour), "old", 10, 1, 0, 0.01)
+	fresh := sampleUsage(now.Add(-time.Hour), "fresh", 20, 2, 0, 0.02)
+	for _, e := range []UsageEvent{old, fresh} {
+		if err := store.Usage().Record(ctx, e); err != nil {
+			t.Fatalf("Record: %v", err)
+		}
+	}
+
+	removed, err := store.Usage().Prune(ctx, now.Add(-24*time.Hour))
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if removed != 1 {
+		t.Errorf("removed = %d, want 1", removed)
+	}
+
+	events, err := store.Usage().Recent(ctx, 10)
+	if err != nil {
+		t.Fatalf("Recent: %v", err)
+	}
+	if len(events) != 1 || events[0].Alias != "fresh" {
+		t.Errorf("events = %+v, want only the fresh row", events)
+	}
+
+	// A second sweep past the same cutoff is a no-op.
+	again, err := store.Usage().Prune(ctx, now.Add(-24*time.Hour))
+	if err != nil {
+		t.Fatalf("Prune again: %v", err)
+	}
+	if again != 0 {
+		t.Errorf("second sweep removed = %d, want 0", again)
+	}
+}
+
+func TestUsageByKeyAggregatesPerKeyAndSpend(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	events := []UsageEvent{
+		{CreatedAt: now.Add(-time.Minute), KeyID: "k1", Alias: "a", Provider: "p", Model: "m", Status: "ok", PromptTokens: 10, CompletionTokens: 2, CostUSD: 0.10},
+		{CreatedAt: now.Add(-2 * time.Minute), KeyID: "k1", Alias: "a", Provider: "p", Model: "m", Status: "ok", PromptTokens: 5, CompletionTokens: 1, CostUSD: 0.05},
+		{CreatedAt: now.Add(-3 * time.Minute), KeyID: "k2", Alias: "a", Provider: "p", Model: "m", Status: "ok", PromptTokens: 1, CompletionTokens: 1, CostUSD: 0.01},
+		// Unattributed traffic groups under the empty key id.
+		{CreatedAt: now.Add(-4 * time.Minute), Alias: "a", Provider: "p", Model: "m", Status: "ok", CostUSD: 0.5},
+	}
+	for _, e := range events {
+		if err := store.Usage().Record(ctx, e); err != nil {
+			t.Fatalf("Record: %v", err)
+		}
+	}
+
+	rows, err := store.Usage().ByKey(ctx, now.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("ByKey: %v", err)
+	}
+	byKey := map[string]KeyUsage{}
+	for _, row := range rows {
+		byKey[row.KeyID] = row
+	}
+	if got := byKey["k1"]; got.Requests != 2 || math.Abs(got.CostUSD-0.15) > 1e-9 {
+		t.Errorf("k1 = %+v, want 2 requests costing 0.15", got)
+	}
+	if got := byKey["k2"]; got.Requests != 1 || got.PromptTokens != 1 {
+		t.Errorf("k2 = %+v, want 1 request with 1 prompt token", got)
+	}
+	if got := byKey[""]; got.Requests != 1 {
+		t.Errorf("unattributed = %+v, want 1 request", got)
+	}
+
+	spend, err := store.Usage().KeySpend(ctx, "k1", now.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("KeySpend: %v", err)
+	}
+	if math.Abs(spend-0.15) > 1e-9 {
+		t.Errorf("KeySpend = %v, want 0.15", spend)
+	}
+
+	// A window that starts after every event sees no spend.
+	spend, err = store.Usage().KeySpend(ctx, "k1", now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("KeySpend future: %v", err)
+	}
+	if spend != 0 {
+		t.Errorf("KeySpend future = %v, want 0", spend)
+	}
+}

@@ -182,7 +182,7 @@ func (s *sqliteAPIKeys) Create(ctx context.Context, key APIKey) error {
 
 func (s *sqliteAPIKeys) GetByHash(ctx context.Context, hash string) (APIKey, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, name, key_hash, enabled, created_at, last_used_at
+		`SELECT `+apiKeyColumns+`
 		 FROM api_keys WHERE key_hash = ?`, hash)
 
 	key, err := scanAPIKey(row)
@@ -197,7 +197,7 @@ func (s *sqliteAPIKeys) GetByHash(ctx context.Context, hash string) (APIKey, err
 
 func (s *sqliteAPIKeys) List(ctx context.Context) ([]APIKey, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, name, key_hash, enabled, created_at, last_used_at
+		`SELECT `+apiKeyColumns+`
 		 FROM api_keys ORDER BY created_at, id`)
 	if err != nil {
 		return nil, fmt.Errorf("storage: list api keys: %w", err)
@@ -227,6 +227,16 @@ func (s *sqliteAPIKeys) TouchLastUsed(ctx context.Context, id string, at time.Ti
 	return affectOne(res, "touch api key")
 }
 
+func (s *sqliteAPIKeys) SetQuota(ctx context.Context, id string, perMin int, budgetUSD float64) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE api_keys SET rate_limit_per_min = ?, monthly_budget_usd = ? WHERE id = ?`,
+		perMin, budgetUSD, id)
+	if err != nil {
+		return fmt.Errorf("storage: set api key quota: %w", err)
+	}
+	return affectOne(res, "set api key quota")
+}
+
 func (s *sqliteAPIKeys) Delete(ctx context.Context, id string) error {
 	res, err := s.db.ExecContext(ctx, `DELETE FROM api_keys WHERE id = ?`, id)
 	if err != nil {
@@ -240,13 +250,17 @@ type scanner interface {
 	Scan(dest ...any) error
 }
 
+const apiKeyColumns = `id, name, key_hash, enabled, created_at, last_used_at,
+	rate_limit_per_min, monthly_budget_usd`
+
 func scanAPIKey(src scanner) (APIKey, error) {
 	var (
 		key      APIKey
 		created  int64
 		lastUsed int64
 	)
-	if err := src.Scan(&key.ID, &key.Name, &key.KeyHash, &key.Enabled, &created, &lastUsed); err != nil {
+	if err := src.Scan(&key.ID, &key.Name, &key.KeyHash, &key.Enabled, &created, &lastUsed,
+		&key.RateLimitPerMin, &key.MonthlyBudgetUSD); err != nil {
 		return APIKey{}, err
 	}
 	key.CreatedAt = time.Unix(created, 0).UTC()
@@ -779,17 +793,17 @@ type sqliteUsage struct {
 	db *sql.DB
 }
 
-const usageColumns = `id, created_at, alias, provider, model, streamed, status, duration_ms,
+const usageColumns = `id, created_at, key_id, alias, provider, model, streamed, status, duration_ms,
 	prompt_tokens, completion_tokens, cached_tokens, cache_write_tokens, reasoning_tokens, cost_usd`
 
 func (s *sqliteUsage) Record(ctx context.Context, e UsageEvent) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO usage_events
-		   (created_at, alias, provider, model, streamed, status, duration_ms,
+		   (created_at, key_id, alias, provider, model, streamed, status, duration_ms,
 		    prompt_tokens, completion_tokens, cached_tokens, cache_write_tokens,
 		    reasoning_tokens, cost_usd)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		e.CreatedAt.Unix(), e.Alias, e.Provider, e.Model, e.Streamed, e.Status,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		e.CreatedAt.Unix(), e.KeyID, e.Alias, e.Provider, e.Model, e.Streamed, e.Status,
 		e.Duration.Milliseconds(), e.PromptTokens, e.CompletionTokens, e.CachedTokens,
 		e.CacheWriteTokens, e.ReasoningTokens, e.CostUSD)
 	if err != nil {
@@ -969,13 +983,74 @@ func (s *sqliteUsage) Leaderboard(ctx context.Context, since time.Time, limit in
 	return out, nil
 }
 
+func (s *sqliteUsage) ByKey(ctx context.Context, since time.Time) ([]KeyUsage, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT key_id,
+		        COUNT(*),
+		        COALESCE(SUM(prompt_tokens), 0),
+		        COALESCE(SUM(completion_tokens), 0),
+		        COALESCE(SUM(cached_tokens), 0),
+		        COALESCE(SUM(cost_usd), 0),
+		        MAX(created_at)
+		 FROM usage_events
+		 WHERE created_at >= ?
+		 GROUP BY key_id
+		 ORDER BY COALESCE(SUM(cost_usd), 0) DESC`, since.Unix())
+	if err != nil {
+		return nil, fmt.Errorf("storage: usage by key: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []KeyUsage
+	for rows.Next() {
+		var (
+			k        KeyUsage
+			lastUsed int64
+		)
+		if err := rows.Scan(&k.KeyID, &k.Requests, &k.PromptTokens,
+			&k.CompletionTokens, &k.CachedTokens, &k.CostUSD, &lastUsed); err != nil {
+			return nil, fmt.Errorf("storage: scan key usage: %w", err)
+		}
+		k.LastUsed = time.Unix(lastUsed, 0).UTC()
+		out = append(out, k)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("storage: usage by key: %w", err)
+	}
+	return out, nil
+}
+
+func (s *sqliteUsage) KeySpend(ctx context.Context, keyID string, since time.Time) (float64, error) {
+	var total float64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(SUM(cost_usd), 0) FROM usage_events
+		 WHERE key_id = ? AND created_at >= ?`, keyID, since.Unix()).Scan(&total)
+	if err != nil {
+		return 0, fmt.Errorf("storage: key spend: %w", err)
+	}
+	return total, nil
+}
+
+func (s *sqliteUsage) Prune(ctx context.Context, before time.Time) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM usage_events WHERE created_at < ?`, before.Unix())
+	if err != nil {
+		return 0, fmt.Errorf("storage: prune usage: %w", err)
+	}
+	removed, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("storage: prune usage: %w", err)
+	}
+	return removed, nil
+}
+
 func scanUsageEvent(src scanner) (UsageEvent, error) {
 	var (
 		e          UsageEvent
 		createdAt  int64
 		durationMS int64
 	)
-	if err := src.Scan(&e.ID, &createdAt, &e.Alias, &e.Provider, &e.Model,
+	if err := src.Scan(&e.ID, &createdAt, &e.KeyID, &e.Alias, &e.Provider, &e.Model,
 		&e.Streamed, &e.Status, &durationMS, &e.PromptTokens, &e.CompletionTokens,
 		&e.CachedTokens, &e.CacheWriteTokens, &e.ReasoningTokens, &e.CostUSD); err != nil {
 		return UsageEvent{}, err

@@ -189,6 +189,15 @@ export type ApiKey = {
   enabled: boolean;
   created_at: string;
   last_used_at: string | null;
+  /** 0 means unlimited. */
+  rate_limit_per_min: number;
+  /** 0 means unlimited. */
+  monthly_budget_usd: number;
+  month_spend_usd: number;
+  requests: number;
+  tokens_in: number;
+  tokens_out: number;
+  cost_usd: number;
 };
 
 export type CreatedApiKey = ApiKey & { key: string };

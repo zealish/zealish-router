@@ -151,6 +151,9 @@ auth:
   enabled: true
   api_keys: []             # static keys, in addition to database-backed keys
 
+usage:
+  retention_days: 90       # delete usage events older than this; 0 keeps all
+
 admin:
   enabled: false           # false unmounts /api/v1 entirely
   token: ""                # generate your own; validation rejects an empty
@@ -166,6 +169,7 @@ admin:
 | `database.path` | SQLite file; parent directories are created on demand. |
 | `auth.enabled` | `false` disables gateway authentication entirely. |
 | `auth.api_keys` | Static keys compared in constant time; useful for local dev. |
+| `usage.retention_days` | Usage events older than this are deleted hourly. `0` keeps every event, growing the database without bound. |
 | `admin.enabled` | Ships `false`, so a default deployment exposes no configuration surface. |
 | `admin.token` | Bearer token for `/api/v1`. Required once `admin.enabled` is true. |
 | `admin.cors_origins` | Exact origins echoed back; wildcards are never sent. |
@@ -211,7 +215,9 @@ version                      print the build version
 | `GET` | `/api/v1/overview` | Usage totals for a window (`?hours=`, default lifetime) plus live counters and resource counts |
 | `GET` | `/api/v1/usage` | Time-bucketed token/cost series for a window (`?hours=`) |
 | `GET` | `/api/v1/usage/recent` | Newest usage events (`?limit=`) |
+| `GET` | `/api/v1/usage/keys` | Spend and tokens per API key for a window (`?hours=`) |
 | `GET` `POST` `DELETE` | `/api/v1/keys[/{id}]` | Gateway keys; the raw key is returned only on create |
+| `PUT` | `/api/v1/keys/{id}/quota` | Set a key's `rate_limit_per_min` and `monthly_budget_usd` |
 | `GET` | `/api/v1/provider-catalog` | Presets for known upstreams |
 | `GET` `PUT` `DELETE` | `/api/v1/providers[/{name}]` | Providers; secrets are never serialised back, an omitted `api_key` keeps the stored one |
 | `GET` `POST` | `/api/v1/providers/{name}/catalog`, `…/import` | List a provider's upstream models and import them as aliases |
@@ -310,6 +316,27 @@ their failure class (`timeout`, `rate_limited`, `upstream_5xx`, `connection`,
 restarts and count every hit on a model. One request is one row, regardless of
 retries and fallbacks. Costs come from the built-in pricing table in
 `internal/pricing`.
+
+Each row is attributed to the API key that authenticated it, which is what
+backs per-key cost reporting and monthly budgets. Rows written before
+attribution existed, and traffic from static keys or an unauthenticated
+gateway, report as `unattributed`. Set `usage.retention_days` to bound the
+log; an hourly sweep deletes anything older.
+
+### Per-key quotas
+
+Each gateway key carries two optional limits, both zero (unlimited) by default
+and editable from the dashboard or `PUT /api/v1/keys/{id}/quota`:
+
+| Field | Meaning |
+|---|---|
+| `rate_limit_per_min` | Requests allowed in a rolling minute. Exceeding it returns `429` with `Retry-After: 60`. |
+| `monthly_budget_usd` | Spend allowed in the current calendar month, priced from the usage log. Exceeding it returns `429` with type `insufficient_quota`. |
+
+Limited keys get `X-RateLimit-Limit` and `X-RateLimit-Remaining` on every
+response. Budget totals are cached for 30 seconds, so a key may overshoot
+slightly under burst traffic — the budget is a cost guardrail, not a ledger.
+Static keys and requests made with `auth.enabled: false` are unmetered.
 
 ---
 

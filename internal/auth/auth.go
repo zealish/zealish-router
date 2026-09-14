@@ -20,10 +20,14 @@ import (
 // ErrUnauthorized is returned when a credential is missing or invalid.
 var ErrUnauthorized = errors.New("auth: unauthorized")
 
-// Identity describes an authenticated caller.
+// Identity describes an authenticated caller. The quota fields are copied off
+// the key record so the request path does not re-read storage to enforce them;
+// zero on either means unlimited.
 type Identity struct {
-	KeyID string
-	Name  string
+	KeyID            string
+	Name             string
+	RateLimitPerMin  int
+	MonthlyBudgetUSD float64
 }
 
 // Authenticator validates credentials presented by clients.
@@ -99,7 +103,12 @@ func (s *Service) Authenticate(ctx context.Context, rawKey string) (Identity, er
 		key, err := s.keys.GetByHash(ctx, hash)
 		if err == nil && key.Enabled {
 			s.touch(key.ID)
-			return Identity{KeyID: key.ID, Name: key.Name}, nil
+			return Identity{
+				KeyID:            key.ID,
+				Name:             key.Name,
+				RateLimitPerMin:  key.RateLimitPerMin,
+				MonthlyBudgetUSD: key.MonthlyBudgetUSD,
+			}, nil
 		}
 	}
 	return Identity{}, ErrUnauthorized

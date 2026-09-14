@@ -20,6 +20,12 @@ auth:
   # `zealish-router keys create --name <name>`, which stores only the hash.
   api_keys: []
 
+# Durable per-request usage log backing the dashboard's totals and costs.
+usage:
+  # Delete usage events older than this many days. 0 keeps every event, which
+  # grows the database without bound on a busy gateway.
+  retention_days: 90
+
 # The admin API is the dashboard's backend and can reconfigure routing, so it
 # ships disabled. Enable it with a token you generate yourself — anything
 # predictable here is a remote configuration hole.

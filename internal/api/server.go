@@ -27,8 +27,10 @@ type Dependencies struct {
 	Store     storage.Store
 	Auth      auth.Authenticator
 	AdminAuth auth.Authenticator
-	Metrics   *metrics.Metrics
-	Logger    *slog.Logger
+	// Quota enforces per-key rate limits and budgets on /v1. Nil disables it.
+	Quota   *auth.Quota
+	Metrics *metrics.Metrics
+	Logger  *slog.Logger
 }
 
 // Server wraps the HTTP listener and its lifecycle.
@@ -69,6 +71,7 @@ func newRoutes(deps Dependencies, h *handler) http.Handler {
 	r.Route("/v1", func(v1 chi.Router) {
 		v1.Use(limitBody(deps.Config.Server.MaxBodyBytes))
 		v1.Use(authenticate(deps.Auth))
+		v1.Use(enforceQuota(deps.Quota))
 		v1.Get("/models", h.listModels)
 		v1.Post("/chat/completions", h.chatCompletions)
 	})

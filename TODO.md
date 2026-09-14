@@ -212,6 +212,37 @@ Legend: `[x]` done · `[ ]` pending · `~` partial (scaffold only, no logic)
 
 ---
 
+## v1.1 — Cost Accountability ✅
+
+### Per-key attribution
+- [x] Migration `0008_key_usage.sql` — `usage_events.key_id` + `(key_id, created_at)` index; pre-existing rows read as unattributed
+- [x] `router.callMeta` carries the authenticated key id and start time through `dispatch`, replacing the bare `started` parameter
+- [x] `storage.UsageStore.ByKey` / `KeySpend` — per-key aggregation and a single narrow spend read for the budget check
+- [x] `GET /api/v1/usage/keys` — spend and tokens per key for a window; deleted keys and static traffic report as `unattributed`
+- [x] `GET /api/v1/keys` joins in lifetime usage and current-month spend
+- [x] Dashboard Keys page: requests, total cost, month-spend-against-budget and rate-limit columns
+
+### Retention
+- [x] `usage.retention_days` config (0 = keep everything, validated non-negative)
+- [x] `storage.PruneUsage` — hourly sweep, immediate first pass so a shortened window applies on restart, bounded per-sweep timeout
+- [x] `storage.UsageStore.Prune` on SQLite and memory
+
+### Per-key quotas (resolves Open Decision #4)
+- [x] Migration `0009_key_quotas.sql` — `api_keys.rate_limit_per_min`, `api_keys.monthly_budget_usd`, both 0 = unlimited
+- [x] `auth.Quota` — rolling-minute window per key, monthly spend cached for 30s, read failure degrades to allow
+- [x] `auth.Identity` carries the quotas, so the request path enforces them without a second storage read
+- [x] `enforceQuota` middleware on `/v1` — 429 + `Retry-After`, `X-RateLimit-Limit`/`-Remaining`, `rate_limit_error` vs `insufficient_quota`
+- [x] `PUT /api/v1/keys/{id}/quota` + dashboard dialog; editing or revoking a key drops its cached window and spend
+
+### Tests
+- [x] Storage: prune drops only rows before the cutoff and is idempotent; `ByKey`/`KeySpend` aggregate per key, group unattributed traffic and ignore prior months
+- [x] Quota: unmetered identities bypass, window slides rather than resetting, keys are isolated, budget blocks only after the cache expires, `Forget` clears state, nil `Quota` allows everything
+- [x] HTTP: 429 envelope and headers for both limits, no headers for an unlimited key, budget message leaks no key id
+- [x] Admin: quota create/update/validation lifecycle, per-key usage joins, `usage/keys` ranking and `unattributed` naming
+- [x] Migrations verified idempotent against the existing production database
+
+---
+
 ## Open Decisions
 
 | # | Decision | Options | Status |
@@ -219,16 +250,22 @@ Legend: `[x]` done · `[ ]` pending · `~` partial (scaffold only, no logic)
 | 1 | SQLite driver | `modernc.org/sqlite` (pure Go) vs `mattn/go-sqlite3` (cgo) | **resolved: `modernc.org/sqlite`** (v0.5) |
 | 2 | Config as source of truth vs DB | YAML-only, DB-only, or YAML seeds DB | **resolved: DB-only** (v0.7) |
 | 3 | Streaming fallback after first byte | commit vs inject error chunk | **resolved: commit** (v0.4) |
-| 4 | Rate limiting scope | v1.0 vs post-1.0 | **resolved: post-1.0** (v1.0) |
+| 4 | Rate limiting scope | v1.0 vs post-1.0 | **resolved: shipped in v1.1**, in-process, keyed on `api_keys` |
 | 5 | `Message.Content` representation | `json.RawMessage` vs typed union | **resolved: `json.RawMessage` + `Text()`** (v0.2) |
 
 ---
 
 ## Next Action
 
-**v1.0 is feature-complete — tagging is all that is left.** Backend, dashboard,
-hardening, CI, packaging and repo hygiene are done: the repo is lint-clean,
-tested under `-race`, ships multi-arch images and static tarballs, a compose
-file and a hardened systemd unit, plus the Next.js dashboard in
-`apps/dashboard`, and CI lints and builds it. Remaining: tag `v1.0.0`. Per-key
-rate limiting is deferred to post-1.0.
+**v1.1 is feature-complete.** Cost accountability landed: every usage row is
+attributed to its API key, the log is bounded by `usage.retention_days`, and
+per-key rate limits and monthly budgets are enforced on `/v1`. Suite is green
+under `-race`, the dashboard lints and builds, and migrations were verified
+against the production database. Remaining: tag `v1.0.0`, then `v1.1.0`.
+
+Candidates for the next cycle, in the order they were recommended:
+- Provider circuit breaker — a hard-down provider is currently retried on every
+  request, paying the full timeout before fallback. Open/half-open state driven
+  by the existing `provider.Retryable` classifier, surfaced on the Providers page.
+- `POST /v1/embeddings` — the one commonly needed OpenAI endpoint still missing;
+  reuses the alias, fallback and pricing machinery.

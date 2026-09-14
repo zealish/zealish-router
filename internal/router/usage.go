@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/zealish/zealish-router/internal/auth"
 	"github.com/zealish/zealish-router/internal/pricing"
 	"github.com/zealish/zealish-router/internal/storage"
 	"github.com/zealish/zealish-router/pkg/openai"
@@ -26,6 +27,23 @@ type usage struct {
 	reasoning  int
 }
 
+// callMeta is the per-request context the usage log needs but routing does
+// not: who authenticated the call and when it started.
+type callMeta struct {
+	keyID   string
+	started time.Time
+}
+
+// metaFrom builds the usage metadata for a request. An unauthenticated call —
+// auth disabled or a static key — carries no key id and stays unattributed.
+func metaFrom(ctx context.Context, started time.Time) callMeta {
+	m := callMeta{started: started}
+	if id, ok := auth.FromContext(ctx); ok && id.KeyID != "static" && id.KeyID != "anonymous" {
+		m.keyID = id.KeyID
+	}
+	return m
+}
+
 // fromReported converts an upstream usage report into internal counts.
 func fromReported(r *openai.Usage) usage {
 	return usage{
@@ -38,27 +56,27 @@ func fromReported(r *openai.Usage) usage {
 }
 
 // recordUsage reports token counts for a route. Zero counts are skipped.
-func (e *Engine) recordUsage(route Route, u usage, streamed bool, started time.Time) {
+func (e *Engine) recordUsage(route Route, u usage, streamed bool, meta callMeta) {
 	if u.prompt == 0 && u.completion == 0 {
 		return
 	}
 	if e.recorder != nil {
 		e.recorder.RecordTokens(route.Provider, route.Model, u.prompt, u.completion)
 	}
-	e.persistUsage(route, u, streamed, "ok", started)
+	e.persistUsage(route, u, streamed, "ok", meta)
 }
 
 // recordFailure appends a failed request to the usage log so lifetime totals
 // count every hit on a model, not only the successful ones. The status column
 // carries the failure class; token counts stay zero.
-func (e *Engine) recordFailure(route Route, streamed bool, status string, started time.Time) {
-	e.persistUsage(route, usage{}, streamed, status, started)
+func (e *Engine) recordFailure(route Route, streamed bool, status string, meta callMeta) {
+	e.persistUsage(route, usage{}, streamed, status, meta)
 }
 
 // persistUsage prices the request and appends it to the usage log. Metrics are
 // in-process and reset on restart, so the durable log is what the dashboard
 // reads. A logging failure must never fail the request that produced it.
-func (e *Engine) persistUsage(route Route, u usage, streamed bool, status string, started time.Time) {
+func (e *Engine) persistUsage(route Route, u usage, streamed bool, status string, meta callMeta) {
 	if e.usage == nil {
 		return
 	}
@@ -66,12 +84,13 @@ func (e *Engine) persistUsage(route Route, u usage, streamed bool, status string
 	now := time.Now().UTC()
 	event := storage.UsageEvent{
 		CreatedAt:        now,
+		KeyID:            meta.keyID,
 		Alias:            route.Alias,
 		Provider:         route.Provider,
 		Model:            route.Model,
 		Streamed:         streamed,
 		Status:           status,
-		Duration:         now.Sub(started),
+		Duration:         now.Sub(meta.started),
 		PromptTokens:     u.prompt,
 		CompletionTokens: u.completion,
 		CachedTokens:     u.cached,
@@ -117,7 +136,7 @@ func usageOf(reported *openai.Usage, req *openai.ChatCompletionRequest, choices 
 // A chunk carrying usage wins; otherwise the deltas are estimated. A cancelled
 // ctx — typically a client disconnect — ends the relay and still records what
 // was streamed before the hangup.
-func (e *Engine) meterStream(ctx context.Context, route Route, req *openai.ChatCompletionRequest, chunks <-chan openai.StreamChunk, started time.Time) <-chan openai.StreamChunk {
+func (e *Engine) meterStream(ctx context.Context, route Route, req *openai.ChatCompletionRequest, chunks <-chan openai.StreamChunk, meta callMeta) <-chan openai.StreamChunk {
 	if e.recorder == nil && e.usage == nil {
 		return chunks
 	}
@@ -149,13 +168,13 @@ func (e *Engine) meterStream(ctx context.Context, route Route, req *openai.ChatC
 		}
 
 		if reported != nil && (reported.PromptTokens > 0 || reported.CompletionTokens > 0) {
-			e.recordUsage(route, fromReported(reported), true, started)
+			e.recordUsage(route, fromReported(reported), true, meta)
 			return
 		}
 		e.recordUsage(route, usage{
 			prompt:     estimatePrompt(req),
 			completion: tokensFromChars(completed),
-		}, true, started)
+		}, true, meta)
 	}()
 	return out
 }
