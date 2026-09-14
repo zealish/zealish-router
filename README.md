@@ -289,12 +289,25 @@ accounts.
 |---|---|
 | `fallback` | Always start at the first member and cascade down the pool. |
 | `round_robin` | Rotate the starting member per request to spread quota, then cascade. |
+| `weighted` | Rotate the starting member in proportion to its weight, then cascade. |
 
 ```sh
 curl -X PUT http://localhost:8787/api/v1/combos/code-agent \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"strategy":"round_robin","members":["gpt-5","fast","local"],"enabled":true}'
+```
+
+`weighted` takes a `weights` array of positive integers, one per member: over
+each cycle of `sum(weights)` requests a member starts exactly as often as its
+weight, and the rest of the pool still follows as fallback. Omitting `weights`
+weighs every member equally, which makes it behave like `round_robin`.
+
+```sh
+curl -X PUT http://localhost:8787/api/v1/combos/code-agent \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"strategy":"weighted","members":["gpt-5","fast","local"],"weights":[3,1,2],"enabled":true}'
 ```
 
 Combos are addressable wherever a model is: `"model": "code-agent"` on

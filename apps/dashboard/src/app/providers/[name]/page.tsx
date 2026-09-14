@@ -37,15 +37,58 @@ import {
   DropdownMenuItem,
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   api,
   ApiError,
+  type AliasMetrics,
+  type Confidence,
+  MIN_CONFIDENT_SAMPLES,
   type ModelAlias,
   PROVIDER_GROUPS,
   type ModelTestResult,
   type Provider,
+  type ProviderMetrics,
 } from "@/lib/api";
 import { useResource } from "@/lib/use-resource";
+
+/** Health metrics refresh on their own, so the page reflects live traffic. */
+const METRICS_POLL_MS = 10_000;
+
+const LOW_SAMPLE_HINT = `Need at least ${MIN_CONFIDENT_SAMPLES} completed requests before P95 becomes statistically meaningful.`;
+
+/** Formats a latency in the unit that keeps it readable: ms under a second. */
+function formatMs(ms: number): string {
+  if (ms <= 0) return "—";
+  return ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(2)} s`;
+}
+
+function formatRate(rate: number): string {
+  return `${rate.toFixed(1)}%`;
+}
+
+function formatCount(n: number): string {
+  return n.toLocaleString();
+}
+
+/** Success-rate bands: anything under 95% is losing real traffic. */
+function successTone(rate: number, confidence: Confidence): string {
+  if (confidence === "low") return "";
+  if (rate >= 99) return "text-emerald-600 dark:text-emerald-400";
+  if (rate >= 95) return "text-amber-600 dark:text-amber-400";
+  return "text-red-600 dark:text-red-400";
+}
+
+/**
+ * P95 bands: a tail past 1.5s is where callers start timing out. A withheld
+ * tail gets no colour at all — a small sample is unknown, not unhealthy.
+ */
+function latencyTone(ms: number | null): string {
+  if (ms === null) return "";
+  if (ms < 800) return "text-emerald-600 dark:text-emerald-400";
+  if (ms <= 1500) return "text-amber-600 dark:text-amber-400";
+  return "text-red-600 dark:text-red-400";
+}
 
 type Draft = {
   alias: string;
@@ -53,24 +96,59 @@ type Draft = {
   fallback: string;
 };
 
+/**
+ * CircuitDot is the compact health indicator for the model list: red while
+ * the provider's circuit is open (the router skips it), green otherwise.
+ */
+function CircuitDot({ circuit }: { circuit?: string }) {
+  const open = circuit === "open";
+  return (
+    <span
+      title={
+        open
+          ? "Provider circuit open — requests are routed around this provider"
+          : "Provider healthy"
+      }
+      className={`size-2 shrink-0 rounded-full ${
+        open ? "bg-red-500" : "bg-emerald-500"
+      }`}
+    />
+  );
+}
+
 export default function ProviderDetailPage() {
   const params = useParams<{ name: string }>();
   const name = decodeURIComponent(params.name);
 
   const providers = useResource<Provider[]>("/providers");
   const { data, error, reload } = useResource<ModelAlias[]>("/models");
+  const metrics = useResource<ProviderMetrics>(
+    `/providers/${encodeURIComponent(name)}/metrics`,
+    METRICS_POLL_MS,
+  );
   const [draft, setDraft] = useState<Draft>();
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [importing, setImporting] = useState(false);
-  // Latency is a live probe result, not stored state: it only exists for the
-  // aliases tested since the page loaded.
-  const [tests, setTests] = useState<Record<string, ModelTestResult>>({});
+  // A probe's own numbers land in the rolling window; the table reads that,
+  // so only the in-flight alias needs local state.
   const [testing, setTesting] = useState<string>();
   const [testingAll, setTestingAll] = useState(false);
 
   const provider = providers.data?.find((p) => p.name === name);
   const models = (data ?? []).filter((m) => m.provider === name);
+
+  const stats: Record<string, AliasMetrics> = {};
+  for (const row of metrics.data?.aliases ?? []) {
+    stats[row.alias] = row;
+  }
+
+  // The summary is pooled over every request server-side, so a low-traffic
+  // alias cannot weigh as much as one carrying the load.
+  const summary = metrics.data?.summary ?? null;
+  const caption = summary
+    ? `${formatCount(summary.requests)} request${summary.requests === 1 ? "" : "s"}`
+    : undefined;
 
   const save = async () => {
     if (!draft) return;
@@ -114,7 +192,6 @@ export default function ProviderDetailPage() {
         `/models/${encodeURIComponent(alias)}/test`,
         {},
       );
-      setTests((prev) => ({ ...prev, [alias]: result }));
       return result;
     } finally {
       setTesting(undefined);
@@ -131,6 +208,9 @@ export default function ProviderDetailPage() {
       }
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : String(err));
+    } finally {
+      // The probe joined the rolling window; pull the new aggregate.
+      await metrics.reload();
     }
   };
 
@@ -152,6 +232,7 @@ export default function ProviderDetailPage() {
       toast.error(err instanceof ApiError ? err.message : String(err));
     } finally {
       setTestingAll(false);
+      await metrics.reload();
     }
   };
 
@@ -162,7 +243,10 @@ export default function ProviderDetailPage() {
         <DataTableColumnHeader column={column} title="Alias" />
       ),
       cell: ({ row }) => (
-        <span className="font-mono text-xs">{row.original.alias}</span>
+        <span className="flex items-center gap-2">
+          <CircuitDot circuit={provider?.circuit} />
+          <span className="font-mono text-xs">{row.original.alias}</span>
+        </span>
       ),
     },
     {
@@ -195,13 +279,13 @@ export default function ProviderDetailPage() {
         ),
     },
     {
-      id: "latency",
-      accessorFn: (model) => tests[model.alias]?.latency_ms ?? -1,
+      id: "ttfb",
+      accessorFn: (model) => stats[model.alias]?.ttfb_ms ?? -1,
       meta: { className: "text-right" },
       header: ({ column }) => (
         <DataTableColumnHeader
           column={column}
-          title="Latency"
+          title="TTFB"
           className="ml-auto"
         />
       ),
@@ -211,14 +295,97 @@ export default function ProviderDetailPage() {
             <Loader2 className="text-muted-foreground ml-auto size-3.5 animate-spin" />
           );
         }
-        const result = tests[row.original.alias];
-        if (!result) {
-          return <span className="text-muted-foreground text-xs">—</span>;
+        const metric = stats[row.original.alias];
+        if (!metric) return <Unmeasured />;
+        return (
+          <span className="font-mono text-xs tabular-nums">
+            {formatMs(metric.ttfb_ms)}
+          </span>
+        );
+      },
+    },
+    {
+      id: "p95",
+      accessorFn: (model) => stats[model.alias]?.p95_ms ?? -1,
+      meta: { className: "text-right" },
+      header: ({ column }) => (
+        <DataTableColumnHeader
+          column={column}
+          title="P95"
+          className="ml-auto"
+        />
+      ),
+      cell: ({ row }) => {
+        const metric = stats[row.original.alias];
+        if (!metric) return <Unmeasured />;
+        // A withheld tail is a sample-size problem, not a health problem, so
+        // it reads as a muted note rather than a failure.
+        if (metric.p95_ms === null) {
+          return (
+            <span
+              className="inline-flex items-center gap-1.5"
+              title={LOW_SAMPLE_HINT}
+            >
+              <span className="text-muted-foreground font-mono text-xs">—</span>
+              <Badge variant="secondary" className="font-normal">
+                Low sample
+              </Badge>
+            </span>
+          );
         }
-        return result.ok ? (
-          <span className="tabular-nums">{result.latency_ms} ms</span>
-        ) : (
-          <Badge variant="destructive">failed</Badge>
+        return (
+          <span
+            className={`font-mono text-xs tabular-nums ${latencyTone(metric.p95_ms)}`}
+          >
+            {formatMs(metric.p95_ms)}
+          </span>
+        );
+      },
+    },
+    {
+      id: "success",
+      accessorFn: (model) => stats[model.alias]?.success_rate ?? -1,
+      meta: { className: "text-right" },
+      header: ({ column }) => (
+        <DataTableColumnHeader
+          column={column}
+          title="Success"
+          className="ml-auto"
+        />
+      ),
+      cell: ({ row }) => {
+        const metric = stats[row.original.alias];
+        if (!metric) return <Unmeasured />;
+        return (
+          <span
+            className={`font-mono text-xs tabular-nums ${successTone(metric.success_rate, metric.confidence)}`}
+          >
+            {formatRate(metric.success_rate)}
+          </span>
+        );
+      },
+    },
+    {
+      id: "requests",
+      accessorFn: (model) => stats[model.alias]?.requests ?? -1,
+      meta: { className: "text-right" },
+      header: ({ column }) => (
+        <DataTableColumnHeader
+          column={column}
+          title="Req"
+          className="ml-auto"
+        />
+      ),
+      cell: ({ row }) => {
+        const metric = stats[row.original.alias];
+        if (!metric) return <Unmeasured />;
+        return (
+          <span
+            className="font-mono text-xs tabular-nums"
+            title={`${formatCount(metric.requests)} request${metric.requests === 1 ? "" : "s"} in the rolling window`}
+          >
+            {formatCount(metric.requests)}
+          </span>
         );
       },
     },
@@ -340,6 +507,42 @@ export default function ProviderDetailPage() {
           </div>
         </CardContent>
       </Card>
+
+      <div className="mb-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <Kpi
+          label="TTFB"
+          value={summary && formatMs(summary.ttfb_ms)}
+          caption={caption}
+          loading={metrics.loading}
+        />
+        <Kpi
+          label="Median"
+          value={summary && formatMs(summary.p50_ms)}
+          caption={caption}
+          loading={metrics.loading}
+        />
+        <Kpi
+          label="P95"
+          value={
+            summary && summary.p95_ms !== null ? formatMs(summary.p95_ms) : null
+          }
+          caption={summary && summary.p95_ms === null ? "Low sample" : caption}
+          hint={
+            summary && summary.p95_ms === null ? LOW_SAMPLE_HINT : undefined
+          }
+          tone={latencyTone(summary?.p95_ms ?? null)}
+          loading={metrics.loading}
+        />
+        <Kpi
+          label="Success"
+          value={summary && formatRate(summary.success_rate)}
+          caption={caption}
+          tone={
+            summary ? successTone(summary.success_rate, summary.confidence) : ""
+          }
+          loading={metrics.loading}
+        />
+      </div>
 
       {error ? (
         <p className="text-destructive text-sm">{error}</p>
@@ -483,5 +686,62 @@ function Detail({
         {value ?? "—"}
       </p>
     </div>
+  );
+}
+
+/** Placeholder for an alias the router has not served since it started. */
+function Unmeasured() {
+  return (
+    <span
+      className="text-muted-foreground text-xs"
+      title="No requests in window"
+    >
+      —
+    </span>
+  );
+}
+
+/**
+ * Kpi renders one headline metric. A null value means the router has nothing
+ * to report — no requests in the window, or a tail it declined to estimate.
+ */
+function Kpi({
+  label,
+  value,
+  caption,
+  loading,
+  tone,
+  hint,
+}: {
+  label: string;
+  value: string | null | undefined;
+  caption?: string;
+  loading: boolean;
+  tone?: string;
+  hint?: string;
+}) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-muted-foreground text-xs font-medium tracking-wide uppercase">
+          {label}
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-1">
+        {loading && value === undefined ? (
+          <Skeleton className="h-8 w-20" />
+        ) : (
+          <span
+            className={`font-mono text-2xl font-semibold tabular-nums ${value ? (tone ?? "") : "text-muted-foreground"}`}
+            title={hint ?? (value ? undefined : "No requests in window")}
+          >
+            {value ?? "—"}
+          </span>
+        )}
+        <p className="text-muted-foreground text-xs" title={hint}>
+          {caption ?? "\u00a0"}
+        </p>
+      </CardContent>
+    </Card>
   );
 }

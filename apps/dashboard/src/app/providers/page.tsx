@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useState } from "react";
 import { toast } from "sonner";
+import { Boxes, Pencil, Plus, Trash2 } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -82,28 +83,34 @@ const prefixFor = (name: string) => (name ? `${name.trim()}/` : "");
 const groupOf = (p: Provider): ProviderGroup => p.group ?? "custom";
 
 /**
- * CircuitBadge surfaces the router's breaker state. A healthy provider shows
- * nothing: the badge is an exception report, not a status line.
+ * CircuitDot surfaces the router's breaker state as a blinking indicator:
+ * red while the circuit is open, green when the provider is healthy.
  */
-function CircuitBadge({ provider }: { provider: Provider }) {
+function CircuitDot({ provider }: { provider: Provider }) {
   const state = provider.circuit ?? "closed";
-  if (state === "closed") return null;
+  const open = state === "open";
 
   const retryAt = provider.circuit_retry_at
     ? new Date(provider.circuit_retry_at).toLocaleTimeString()
     : undefined;
 
-  return state === "open" ? (
-    <Badge
-      variant="destructive"
-      title={retryAt ? `Next probe at ${retryAt}` : undefined}
-    >
-      circuit open
-    </Badge>
-  ) : (
-    <Badge variant="outline" title="Probing whether the provider recovered">
-      probing
-    </Badge>
+  const title = open
+    ? retryAt
+      ? `Circuit open — next probe at ${retryAt}`
+      : "Circuit open"
+    : state === "half_open"
+      ? "Probing whether the provider recovered"
+      : "Provider healthy";
+
+  const color = open ? "bg-red-500" : "bg-emerald-500";
+
+  return (
+    <span title={title} className="relative flex size-2.5 shrink-0">
+      <span
+        className={`absolute inline-flex h-full w-full animate-ping rounded-full opacity-75 ${color}`}
+      />
+      <span className={`relative inline-flex size-2.5 rounded-full ${color}`} />
+    </span>
   );
 }
 
@@ -114,6 +121,8 @@ export default function ProvidersPage() {
   const [draft, setDraft] = useState<Draft>();
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
+  // Provider name awaiting delete confirmation; undefined keeps the dialog closed.
+  const [deleting, setDeleting] = useState<string>();
 
   const openAdd = (group: ProviderGroup) => {
     setDraft(blankDraft(group));
@@ -183,10 +192,10 @@ export default function ProvidersPage() {
   };
 
   const remove = async (name: string) => {
-    if (!confirm(`Delete provider '${name}'?`)) return;
     try {
       await api.del(`/providers/${encodeURIComponent(name)}`);
       toast.success(`Deleted provider '${name}'.`);
+      setDeleting(undefined);
       await reload();
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : String(err));
@@ -219,6 +228,7 @@ export default function ProvidersPage() {
                   </p>
                 </div>
                 <Button variant="outline" onClick={() => openAdd(group.id)}>
+                  <Plus />
                   Add
                 </Button>
               </div>
@@ -248,10 +258,8 @@ export default function ProvidersPage() {
                             {p.base_url}
                           </CardDescription>
                           <CardAction className="flex items-center gap-1.5">
-                            <CircuitBadge provider={p} />
-                            {p.enabled ? (
-                              <Badge>enabled</Badge>
-                            ) : (
+                            <CircuitDot provider={p} />
+                            {!p.enabled && (
                               <Badge variant="outline">disabled</Badge>
                             )}
                           </CardAction>
@@ -289,6 +297,7 @@ export default function ProvidersPage() {
                               <Link
                                 href={`/providers/${encodeURIComponent(p.name)}`}
                               >
+                                <Boxes />
                                 Models
                               </Link>
                             </Button>
@@ -297,15 +306,17 @@ export default function ProvidersPage() {
                               size="sm"
                               onClick={() => openEdit(p)}
                             >
+                              <Pencil />
                               Edit
                             </Button>
                             <Button
                               variant="destructive"
-                              size="sm"
+                              size="icon-sm"
                               className="ml-auto"
-                              onClick={() => remove(p.name)}
+                              title="Delete provider"
+                              onClick={() => setDeleting(p.name)}
                             >
-                              Delete
+                              <Trash2 />
                             </Button>
                           </div>
                         </CardContent>
@@ -318,6 +329,33 @@ export default function ProvidersPage() {
           );
         })}
       </div>
+
+      <Dialog
+        open={deleting !== undefined}
+        onOpenChange={(open) => !open && setDeleting(undefined)}
+      >
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Delete provider</DialogTitle>
+            <DialogDescription>
+              Delete provider &lsquo;{deleting}&rsquo;? Its models and routing
+              entries will stop working. This cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleting(undefined)}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => deleting && remove(deleting)}
+            >
+              <Trash2 />
+              Delete
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog
         open={draft !== undefined}

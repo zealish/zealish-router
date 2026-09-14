@@ -72,6 +72,7 @@ func newRoutes(deps Dependencies, h *handler) http.Handler {
 		v1.Use(limitBody(deps.Config.Server.MaxBodyBytes))
 		v1.Use(authenticate(deps.Auth))
 		v1.Use(enforceQuota(deps.Quota))
+		v1.Use(traceRequests())
 		v1.Get("/models", h.listModels)
 		v1.Post("/chat/completions", h.chatCompletions)
 		v1.Post("/embeddings", h.embeddings)

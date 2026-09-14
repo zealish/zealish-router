@@ -67,6 +67,10 @@ func TestAdminComboValidation(t *testing.T) {
 		{"no members", "/api/v1/combos/c", `{"members":[]}`, http.StatusBadRequest},
 		{"unknown member", "/api/v1/combos/c", `{"members":["ghost"]}`, http.StatusBadRequest},
 		{"bad strategy", "/api/v1/combos/c", `{"strategy":"random","members":["gpt-5"]}`, http.StatusBadRequest},
+		{"weight count mismatch", "/api/v1/combos/c",
+			`{"strategy":"weighted","members":["gpt-5","fast"],"weights":[3]}`, http.StatusBadRequest},
+		{"non-positive weight", "/api/v1/combos/c",
+			`{"strategy":"weighted","members":["gpt-5"],"weights":[0]}`, http.StatusBadRequest},
 		{"alias name clash", "/api/v1/combos/gpt-5", `{"members":["fast"]}`, http.StatusConflict},
 	}
 	for _, tc := range cases {

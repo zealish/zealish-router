@@ -2,7 +2,15 @@
 
 import { useState } from "react";
 import { toast } from "sonner";
-import { ArrowDown, ArrowUp, ChevronsUpDown, X } from "lucide-react";
+import {
+  ArrowDown,
+  ArrowUp,
+  ChevronsUpDown,
+  Pencil,
+  Plus,
+  Trash2,
+  X,
+} from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -61,9 +69,13 @@ const blankDraft = (): Draft => ({
   name: "",
   strategy: "fallback",
   members: [],
+  weights: [],
   enabled: true,
   editing: false,
 });
+
+/** One weight per member, defaulting to an equal share. */
+const weightAt = (weights: number[], index: number) => weights[index] ?? 1;
 
 export default function CombosPage() {
   const { data, error, reload } = useResource<Combo[]>("/combos");
@@ -71,6 +83,8 @@ export default function CombosPage() {
   const [draft, setDraft] = useState<Draft>();
   const [saving, setSaving] = useState(false);
   const [picking, setPicking] = useState(false);
+  const [deleting, setDeleting] = useState<string>();
+  const [removing, setRemoving] = useState(false);
 
   const save = async () => {
     if (!draft) return;
@@ -83,6 +97,10 @@ export default function CombosPage() {
       await api.put(`/combos/${encodeURIComponent(draft.name.trim())}`, {
         strategy: draft.strategy,
         members: draft.members,
+        weights:
+          draft.strategy === "weighted"
+            ? draft.members.map((_, i) => weightAt(draft.weights, i))
+            : [],
         enabled: draft.enabled,
       });
       toast.success(`Saved combo '${draft.name}'.`);
@@ -96,13 +114,16 @@ export default function CombosPage() {
   };
 
   const remove = async (name: string) => {
-    if (!confirm(`Delete combo '${name}'?`)) return;
+    setRemoving(true);
     try {
       await api.del(`/combos/${encodeURIComponent(name)}`);
       toast.success(`Deleted combo '${name}'.`);
+      setDeleting(undefined);
       await reload();
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : String(err));
+    } finally {
+      setRemoving(false);
     }
   };
 
@@ -112,11 +133,31 @@ export default function CombosPage() {
 
   const move = (index: number, by: number) => {
     if (!draft) return;
-    const next = [...draft.members];
     const target = index + by;
-    if (target < 0 || target >= next.length) return;
-    [next[index], next[target]] = [next[target], next[index]];
-    setDraft({ ...draft, members: next });
+    if (target < 0 || target >= draft.members.length) return;
+    const members = [...draft.members];
+    const weights = draft.members.map((_, i) => weightAt(draft.weights, i));
+    [members[index], members[target]] = [members[target], members[index]];
+    [weights[index], weights[target]] = [weights[target], weights[index]];
+    setDraft({ ...draft, members, weights });
+  };
+
+  const removeMember = (index: number) => {
+    if (!draft) return;
+    setDraft({
+      ...draft,
+      members: draft.members.filter((_, i) => i !== index),
+      weights: draft.members
+        .map((_, i) => weightAt(draft.weights, i))
+        .filter((_, i) => i !== index),
+    });
+  };
+
+  const setWeight = (index: number, weight: number) => {
+    if (!draft) return;
+    const weights = draft.members.map((_, i) => weightAt(draft.weights, i));
+    weights[index] = weight;
+    setDraft({ ...draft, weights });
   };
 
   return (
@@ -126,6 +167,7 @@ export default function CombosPage() {
         description="Virtual models: one name backed by a pool of aliases, tried in strategy order."
         action={
           <Button variant="outline" onClick={() => setDraft(blankDraft())}>
+            <Plus />
             Create combo
           </Button>
         }
@@ -164,6 +206,11 @@ export default function CombosPage() {
                         {i + 1}
                       </span>
                       <span className="font-mono break-all">{member}</span>
+                      {c.strategy === "weighted" ? (
+                        <span className="text-muted-foreground ml-auto text-xs">
+                          ×{weightAt(c.weights, i)}
+                        </span>
+                      ) : null}
                     </li>
                   ))}
                 </ol>
@@ -173,14 +220,16 @@ export default function CombosPage() {
                     size="sm"
                     onClick={() => setDraft({ ...c, editing: true })}
                   >
+                    <Pencil />
                     Edit
                   </Button>
                   <Button
                     variant="destructive"
                     size="sm"
                     className="ml-auto"
-                    onClick={() => remove(c.name)}
+                    onClick={() => setDeleting(c.name)}
                   >
+                    <Trash2 />
                     Delete
                   </Button>
                 </div>
@@ -189,6 +238,40 @@ export default function CombosPage() {
           ))}
         </div>
       )}
+
+      <Dialog
+        open={deleting !== undefined}
+        onOpenChange={(open) => !open && setDeleting(undefined)}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete combo</DialogTitle>
+            <DialogDescription>
+              Delete combo{" "}
+              <span className="text-foreground font-mono">{deleting}</span>?
+              Clients requesting this name will no longer resolve. This cannot
+              be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              type="button"
+              onClick={() => setDeleting(undefined)}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={removing}
+              onClick={() => deleting && void remove(deleting)}
+            >
+              <Trash2 />
+              Delete
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog
         open={draft !== undefined}
@@ -275,6 +358,18 @@ export default function CombosPage() {
                         <span className="flex-1 font-mono text-xs break-all">
                           {member}
                         </span>
+                        {draft.strategy === "weighted" ? (
+                          <Input
+                            type="number"
+                            min={1}
+                            className="h-8 w-16"
+                            aria-label={`Weight for ${member}`}
+                            value={weightAt(draft.weights, i)}
+                            onChange={(e) =>
+                              setWeight(i, Math.max(1, Number(e.target.value)))
+                            }
+                          />
+                        ) : null}
                         <Button
                           type="button"
                           variant="ghost"
@@ -295,14 +390,7 @@ export default function CombosPage() {
                           type="button"
                           variant="ghost"
                           size="icon"
-                          onClick={() =>
-                            setDraft({
-                              ...draft,
-                              members: draft.members.filter(
-                                (m) => m !== member,
-                              ),
-                            })
-                          }
+                          onClick={() => removeMember(i)}
                         >
                           <X />
                         </Button>
@@ -343,6 +431,12 @@ export default function CombosPage() {
                                   setDraft({
                                     ...draft,
                                     members: [...draft.members, m.alias],
+                                    weights: [
+                                      ...draft.members.map((_, i) =>
+                                        weightAt(draft.weights, i),
+                                      ),
+                                      1,
+                                    ],
                                   });
                                   setPicking(false);
                                 }}

@@ -27,7 +27,8 @@ type Config struct {
 
 // Router configures the routing engine's resilience policy.
 type Router struct {
-	Breaker Breaker `yaml:"breaker"`
+	Breaker     Breaker     `yaml:"breaker"`
+	HealthCheck HealthCheck `yaml:"health_check"`
 }
 
 // Breaker is the default circuit breaker policy. Individual providers may
@@ -39,6 +40,17 @@ type Breaker struct {
 	// Cooldown is how long a tripped provider is skipped before one probe
 	// request is allowed through.
 	Cooldown time.Duration `yaml:"cooldown"`
+}
+
+// HealthCheck configures the background provider liveness probe. Providers
+// that fail a probe are skipped by the router until they pass one again.
+type HealthCheck struct {
+	// Enabled turns the background pinger on.
+	Enabled bool `yaml:"enabled"`
+	// Interval is how often every provider is pinged.
+	Interval time.Duration `yaml:"interval"`
+	// Timeout bounds a single ping.
+	Timeout time.Duration `yaml:"timeout"`
 }
 
 // Server holds HTTP listener settings.
@@ -97,7 +109,8 @@ func Default() *Config {
 		Auth:     Auth{Enabled: true},
 		Admin:    Admin{Enabled: true, Origins: []string{"http://localhost:3000"}},
 		Router: Router{
-			Breaker: Breaker{FailureThreshold: 5, Cooldown: 30 * time.Second},
+			Breaker:     Breaker{FailureThreshold: 5, Cooldown: 30 * time.Second},
+			HealthCheck: HealthCheck{Enabled: true, Interval: 30 * time.Second, Timeout: 5 * time.Second},
 		},
 	}
 }
@@ -137,6 +150,14 @@ func (c *Config) Validate() error {
 	if c.Router.Breaker.Cooldown < 0 {
 		return fmt.Errorf("config: invalid router.breaker.cooldown %s",
 			c.Router.Breaker.Cooldown)
+	}
+	if c.Router.HealthCheck.Interval < 0 {
+		return fmt.Errorf("config: invalid router.health_check.interval %s",
+			c.Router.HealthCheck.Interval)
+	}
+	if c.Router.HealthCheck.Timeout < 0 {
+		return fmt.Errorf("config: invalid router.health_check.timeout %s",
+			c.Router.HealthCheck.Timeout)
 	}
 	if c.Database.Path == "" {
 		return errors.New("config: database.path is required")

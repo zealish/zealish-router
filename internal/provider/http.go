@@ -195,7 +195,7 @@ func (p *httpProvider) do(ctx context.Context, path string, payload []byte, stre
 		return nil, &Error{Provider: p.opts.Name, Message: fmt.Sprintf("invalid base_url: %v", err)}
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
+	httpReq, err := http.NewRequestWithContext(traceFirstByte(ctx), http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
 		return nil, &Error{Provider: p.opts.Name, Message: fmt.Sprintf("build request: %v", err)}
 	}

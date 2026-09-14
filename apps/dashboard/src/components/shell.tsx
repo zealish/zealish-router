@@ -5,6 +5,7 @@ import Image from "next/image";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import {
+  Activity,
   KeyRound,
   LayoutDashboard,
   Layers,
@@ -24,6 +25,7 @@ import { ThemeToggle } from "@/components/theme-toggle";
 const NAV = [
   { href: "/", label: "Overview", icon: LayoutDashboard },
   { href: "/providers", label: "Providers", icon: Server },
+  { href: "/requests", label: "Request Trace", icon: Activity },
   { href: "/combos", label: "Combos", icon: Layers },
   { href: "/proxies", label: "Proxy Pool", icon: Network },
   { href: "/keys", label: "Endpoint & Keys", icon: KeyRound },

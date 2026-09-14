@@ -101,16 +101,18 @@ export type Combo = {
   name: string;
   strategy: ComboStrategy;
   members: string[];
+  weights: number[];
   enabled: boolean;
 };
 
 export type ComboInput = {
   strategy: ComboStrategy;
   members: string[];
+  weights: number[];
   enabled: boolean;
 };
 
-export type ComboStrategy = "fallback" | "round_robin";
+export type ComboStrategy = "fallback" | "round_robin" | "weighted";
 
 /** Strategies, mirroring storage.ComboStrategy in internal/storage/storage.go. */
 export const COMBO_STRATEGIES: {
@@ -130,6 +132,12 @@ export const COMBO_STRATEGIES: {
     description:
       "Rotate the starting member per request to spread quota, then cascade.",
   },
+  {
+    id: "weighted",
+    label: "Weighted",
+    description:
+      "Rotate the starting member in proportion to its weight, then cascade.",
+  },
 ];
 
 export type UsageEvent = {
@@ -147,6 +155,67 @@ export type UsageEvent = {
   reasoning_tokens: number;
   total_tokens: number;
   cost_usd: number;
+};
+
+/**
+ * Attempt outcomes, mirroring router.classify in internal/router/router.go
+ * plus the two classes the chain assigns to routes it skipped without calling.
+ */
+export const REQUEST_STATUSES = [
+  "ok",
+  "timeout",
+  "rate_limited",
+  "upstream_5xx",
+  "connection",
+  "client_error",
+  "canceled",
+  "circuit_open",
+  "unhealthy",
+] as const;
+
+export type RequestStatus = (typeof REQUEST_STATUSES)[number];
+
+/** One upstream call inside a trace, served by /requests/:id. */
+export type RequestAttempt = {
+  seq: number;
+  started_at: string;
+  alias: string;
+  provider: string;
+  model: string;
+  latency_ms: number;
+  status: string;
+  /** A repeat of the same route. */
+  retry: boolean;
+  /** Reached by falling back off the route before it. */
+  fallback: boolean;
+  error?: string;
+};
+
+/**
+ * One gateway request. The list view leaves `attempts` empty; the detail
+ * endpoint fills it with the whole timeline.
+ */
+export type RequestTrace = {
+  request_id: string;
+  created_at: string;
+  api_key: string;
+  model: string;
+  streamed: boolean;
+  total_latency_ms: number;
+  total_tokens: number;
+  total_cost_usd: number;
+  final_provider: string;
+  final_alias: string;
+  final_status: string;
+  attempt_count: number;
+  attempts?: RequestAttempt[];
+};
+
+export type RequestList = {
+  items: RequestTrace[];
+  total: number;
+  limit: number;
+  offset: number;
 };
 
 export type ModelUsage = {
@@ -281,7 +350,43 @@ export type ModelTestResult = {
   model: string;
   ok: boolean;
   latency_ms: number;
+  ttfb_ms: number;
   error?: string;
+};
+
+/** Sample size below which a tail percentile is withheld by the router. */
+export const MIN_CONFIDENT_SAMPLES = 10;
+
+export type Confidence = "low" | "high";
+
+/**
+ * Rolling request-window stats, served by /providers/:name/metrics. `p95_ms`
+ * is null until the window holds enough samples to estimate a tail.
+ */
+export type AliasMetrics = {
+  alias: string;
+  ttfb_ms: number;
+  p50_ms: number;
+  p95_ms: number | null;
+  success_rate: number;
+  requests: number;
+  confidence: Confidence;
+  updated_at: string;
+};
+
+/** The provider's aliases pooled over every request, not averaged. */
+export type MetricsSummary = {
+  ttfb_ms: number;
+  p50_ms: number;
+  p95_ms: number | null;
+  success_rate: number;
+  requests: number;
+  confidence: Confidence;
+};
+
+export type ProviderMetrics = {
+  aliases: AliasMetrics[];
+  summary: MetricsSummary | null;
 };
 
 export type CatalogModel = {

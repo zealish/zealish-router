@@ -91,6 +91,32 @@ func runComboSuite(t *testing.T, store Store) {
 	if err := store.Combos().Delete(ctx, "ghost"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("delete missing combo err = %v, want ErrNotFound", err)
 	}
+
+	// Weighted pools keep one share per member, pruned positionally.
+	seedComboProvider(t, store, "openai", "gpt-5", "fast")
+	seedComboProvider(t, store, "ollama", "local")
+	if err := store.Combos().Put(ctx, Combo{
+		Name:     "spread",
+		Strategy: ComboWeighted,
+		Members:  []string{"gpt-5", "local", "fast"},
+		Weights:  []int{3, 1, 2},
+		Enabled:  true,
+	}); err != nil {
+		t.Fatalf("put weighted combo: %v", err)
+	}
+	if err := store.Providers().Delete(ctx, "ollama"); err != nil {
+		t.Fatalf("delete provider: %v", err)
+	}
+	weighted, err := store.Combos().Get(ctx, "spread")
+	if err != nil {
+		t.Fatalf("get weighted combo: %v", err)
+	}
+	if len(weighted.Members) != 2 || weighted.Members[1] != "fast" {
+		t.Fatalf("members = %v, want gpt-5 and fast", weighted.Members)
+	}
+	if len(weighted.Weights) != 2 || weighted.Weights[0] != 3 || weighted.Weights[1] != 2 {
+		t.Fatalf("weights = %v, want [3 2] aligned with the kept members", weighted.Weights)
+	}
 }
 
 func TestSQLiteComboStore(t *testing.T) { runComboSuite(t, newTestStore(t)) }

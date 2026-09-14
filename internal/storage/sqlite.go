@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,6 +33,7 @@ type SQLite struct {
 	proxies   *sqliteProxies
 	settings  *sqliteSettings
 	usage     *sqliteUsage
+	traces    *sqliteTraces
 }
 
 // OpenSQLite opens (creating if needed) the database at path, creates its
@@ -71,6 +73,7 @@ func OpenSQLite(ctx context.Context, path string) (*SQLite, error) {
 		proxies:   &sqliteProxies{db: db},
 		settings:  &sqliteSettings{db: db},
 		usage:     &sqliteUsage{db: db},
+		traces:    &sqliteTraces{db: db},
 	}, nil
 }
 
@@ -160,6 +163,9 @@ func (s *SQLite) Settings() SettingStore { return s.settings }
 
 // Usage implements Store.
 func (s *SQLite) Usage() UsageStore { return s.usage }
+
+// Traces implements Store.
+func (s *SQLite) Traces() TraceStore { return s.traces }
 
 // Close implements Store.
 func (s *SQLite) Close() error { return s.db.Close() }
@@ -593,7 +599,7 @@ type sqliteCombos struct {
 
 func (s *sqliteCombos) List(ctx context.Context) ([]Combo, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT name, strategy, members, enabled FROM combos ORDER BY name`)
+		`SELECT name, strategy, members, weights, enabled FROM combos ORDER BY name`)
 	if err != nil {
 		return nil, fmt.Errorf("storage: list combos: %w", err)
 	}
@@ -615,7 +621,7 @@ func (s *sqliteCombos) List(ctx context.Context) ([]Combo, error) {
 
 func (s *sqliteCombos) Get(ctx context.Context, name string) (Combo, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT name, strategy, members, enabled FROM combos WHERE name = ?`, name)
+		`SELECT name, strategy, members, weights, enabled FROM combos WHERE name = ?`, name)
 
 	c, err := scanCombo(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -629,13 +635,14 @@ func (s *sqliteCombos) Get(ctx context.Context, name string) (Combo, error) {
 
 func (s *sqliteCombos) Put(ctx context.Context, c Combo) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO combos (name, strategy, members, enabled)
-		 VALUES (?, ?, ?, ?)
+		`INSERT INTO combos (name, strategy, members, weights, enabled)
+		 VALUES (?, ?, ?, ?, ?)
 		 ON CONFLICT(name) DO UPDATE SET
 		   strategy = excluded.strategy,
 		   members = excluded.members,
+		   weights = excluded.weights,
 		   enabled = excluded.enabled`,
-		c.Name, string(c.Strategy), encodeFallback(c.Members), c.Enabled)
+		c.Name, string(c.Strategy), encodeFallback(c.Members), encodeWeights(c.Weights), c.Enabled)
 	if err != nil {
 		return fmt.Errorf("storage: put combo: %w", err)
 	}
@@ -715,51 +722,89 @@ func (s *sqliteProxies) Delete(ctx context.Context, name string) error {
 
 // pruneComboMembers strips deleted aliases from every combo pool and removes
 // the combos left without a single member, so no combo routes into thin air.
+// Weights are positional, so they are pruned with the members they belong to.
 func pruneComboMembers(ctx context.Context, tx *sql.Tx, dropped map[string]bool) error {
 	if len(dropped) == 0 {
 		return nil
 	}
 
-	rows, err := tx.QueryContext(ctx, `SELECT name, members FROM combos WHERE members <> ''`)
+	rows, err := tx.QueryContext(ctx, `SELECT name, members, weights FROM combos WHERE members <> ''`)
 	if err != nil {
 		return fmt.Errorf("storage: list combos: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	updates := map[string]string{}
+	type pruned struct{ members, weights string }
+	updates := map[string]pruned{}
 	for rows.Next() {
-		var name, members string
-		if err := rows.Scan(&name, &members); err != nil {
+		var name, members, weights string
+		if err := rows.Scan(&name, &members, &weights); err != nil {
 			return fmt.Errorf("storage: scan combo members: %w", err)
 		}
 		pool := decodeFallback(members)
-		kept := make([]string, 0, len(pool))
-		for _, member := range pool {
-			if !dropped[member] {
-				kept = append(kept, member)
+		shares := decodeWeights(weights)
+		keptMembers := make([]string, 0, len(pool))
+		keptWeights := make([]int, 0, len(shares))
+		for i, member := range pool {
+			if dropped[member] {
+				continue
+			}
+			keptMembers = append(keptMembers, member)
+			if i < len(shares) {
+				keptWeights = append(keptWeights, shares[i])
 			}
 		}
-		if len(kept) != len(pool) {
-			updates[name] = encodeFallback(kept)
+		if len(keptMembers) != len(pool) {
+			updates[name] = pruned{encodeFallback(keptMembers), encodeWeights(keptWeights)}
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("storage: list combos: %w", err)
 	}
 
-	for name, members := range updates {
-		if members == "" {
+	for name, up := range updates {
+		if up.members == "" {
 			if _, err := tx.ExecContext(ctx, `DELETE FROM combos WHERE name = ?`, name); err != nil {
 				return fmt.Errorf("storage: delete empty combo: %w", err)
 			}
 			continue
 		}
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE combos SET members = ? WHERE name = ?`, members, name); err != nil {
+			`UPDATE combos SET members = ?, weights = ? WHERE name = ?`,
+			up.members, up.weights, name); err != nil {
 			return fmt.Errorf("storage: prune combo members: %w", err)
 		}
 	}
 	return nil
+}
+
+// Weights are positional shares for the combo members, kept in a comma-
+// separated column for the same reason fallback chains are.
+func encodeWeights(weights []int) string {
+	if len(weights) == 0 {
+		return ""
+	}
+	parts := make([]string, len(weights))
+	for i, w := range weights {
+		parts[i] = strconv.Itoa(w)
+	}
+	return strings.Join(parts, ",")
+}
+
+func decodeWeights(raw string) []int {
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]int, 0, len(parts))
+	for _, part := range parts {
+		w, err := strconv.Atoi(part)
+		if err != nil {
+			return nil
+		}
+		out = append(out, w)
+	}
+	return out
 }
 
 func scanCombo(src scanner) (Combo, error) {
@@ -767,12 +812,14 @@ func scanCombo(src scanner) (Combo, error) {
 		c        Combo
 		strategy string
 		members  string
+		weights  string
 	)
-	if err := src.Scan(&c.Name, &strategy, &members, &c.Enabled); err != nil {
+	if err := src.Scan(&c.Name, &strategy, &members, &weights, &c.Enabled); err != nil {
 		return Combo{}, err
 	}
 	c.Strategy = ComboStrategy(strategy)
 	c.Members = decodeFallback(members)
+	c.Weights = decodeWeights(weights)
 	return c, nil
 }
 

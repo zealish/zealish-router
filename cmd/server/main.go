@@ -177,10 +177,27 @@ func modelsCommand(cfg *config.Config) error {
 		_, _ = fmt.Fprintln(w, "\nCOMBO\tSTRATEGY\tENABLED\tMEMBERS")
 		for _, c := range combos {
 			_, _ = fmt.Fprintf(w, "%s\t%s\t%t\t%s\n",
-				c.Name, c.Strategy, c.Enabled, strings.Join(c.Members, " → "))
+				c.Name, c.Strategy, c.Enabled, strings.Join(comboMembers(c), " → "))
 		}
 	}
 	return w.Flush()
+}
+
+// comboMembers renders a pool, annotating each member with its weight when the
+// combo routes by weight.
+func comboMembers(c storage.Combo) []string {
+	if c.Strategy != storage.ComboWeighted {
+		return c.Members
+	}
+	out := make([]string, len(c.Members))
+	for i, member := range c.Members {
+		weight := 1
+		if i < len(c.Weights) && c.Weights[i] > 0 {
+			weight = c.Weights[i]
+		}
+		out[i] = fmt.Sprintf("%s (%d)", member, weight)
+	}
+	return out
 }
 
 func serve(cfg *config.Config, configPath string, logger *slog.Logger) error {
@@ -195,13 +212,16 @@ func serve(cfg *config.Config, configPath string, logger *slog.Logger) error {
 	logger.Info("database ready", slog.String("path", cfg.Database.Path))
 
 	// Retention runs for the lifetime of the process; ctx cancellation on
-	// shutdown stops it.
-	go storage.PruneUsage(ctx, store.Usage(),
-		time.Duration(cfg.Usage.RetentionDays)*24*time.Hour, logger)
+	// shutdown stops it. Traces share the usage window: they describe the same
+	// requests, so keeping one past the other has no use.
+	retention := time.Duration(cfg.Usage.RetentionDays) * 24 * time.Hour
+	go storage.PruneUsage(ctx, store.Usage(), retention, logger)
+	go storage.PruneTraces(ctx, store.Traces(), retention, logger)
 
 	collector := metrics.New()
 	engine := router.NewEngine(logger, collector)
 	engine.SetUsageStore(store.Usage())
+	engine.SetTraceStore(store.Traces())
 	engine.SetBreakerPolicy(router.BreakerPolicy{
 		FailureThreshold: cfg.Router.Breaker.FailureThreshold,
 		Cooldown:         cfg.Router.Breaker.Cooldown,
@@ -209,6 +229,14 @@ func serve(cfg *config.Config, configPath string, logger *slog.Logger) error {
 	loader := router.NewLoader(store.Providers(), store.Models(), store.Combos(), store.Proxies(), engine)
 	if err := loader.Load(ctx); err != nil {
 		return err
+	}
+
+	if cfg.Router.HealthCheck.Enabled {
+		checker := router.NewHealthChecker(engine, router.HealthCheckPolicy{
+			Interval: cfg.Router.HealthCheck.Interval,
+			Timeout:  cfg.Router.HealthCheck.Timeout,
+		}, logger)
+		go checker.Run(ctx)
 	}
 
 	authenticator := auth.NewService(cfg.Auth.Enabled, cfg.Auth.APIKeys, store.APIKeys(), logger)

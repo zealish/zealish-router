@@ -28,19 +28,25 @@ type usage struct {
 }
 
 // callMeta is the per-request context the usage log needs but routing does
-// not: who authenticated the call and when it started.
+// not: who authenticated the call, when it started, and the trace collecting
+// its attempts.
 type callMeta struct {
 	keyID   string
 	started time.Time
+	// trace is nil when the request carries no gateway id, which is what
+	// keeps tracing free for callers that never enabled it.
+	trace *trace
 }
 
-// metaFrom builds the usage metadata for a request. An unauthenticated call —
-// auth disabled or a static key — carries no key id and stays unattributed.
-func metaFrom(ctx context.Context, started time.Time) callMeta {
-	m := callMeta{started: started}
+// beginRequest builds the per-request metadata and opens its trace. An
+// unauthenticated call — auth disabled or a static key — carries no key id and
+// stays unattributed.
+func beginRequest(ctx context.Context, model string, streamed bool) callMeta {
+	m := callMeta{started: time.Now()}
 	if id, ok := auth.FromContext(ctx); ok && id.KeyID != "static" && id.KeyID != "anonymous" {
 		m.keyID = id.KeyID
 	}
+	m.trace = newTrace(ctx, model, streamed, m)
 	return m
 }
 
@@ -77,11 +83,22 @@ func (e *Engine) recordFailure(route Route, streamed bool, status string, meta c
 // in-process and reset on restart, so the durable log is what the dashboard
 // reads. A logging failure must never fail the request that produced it.
 func (e *Engine) persistUsage(route Route, u usage, streamed bool, status string, meta callMeta) {
+	now := time.Now().UTC()
+	cost := pricing.Cost(route.Model, pricing.Tokens{
+		Prompt:     u.prompt,
+		Completion: u.completion,
+		Cached:     u.cached,
+		CacheWrite: u.cacheWrite,
+		Reasoning:  u.reasoning,
+	})
+	// The trace carries its own totals, so it is metered even when the usage
+	// log is disabled.
+	meta.trace.meter(u.prompt+u.completion, cost)
+
 	if e.usage == nil {
 		return
 	}
 
-	now := time.Now().UTC()
 	event := storage.UsageEvent{
 		CreatedAt:        now,
 		KeyID:            meta.keyID,
@@ -96,13 +113,7 @@ func (e *Engine) persistUsage(route Route, u usage, streamed bool, status string
 		CachedTokens:     u.cached,
 		CacheWriteTokens: u.cacheWrite,
 		ReasoningTokens:  u.reasoning,
-		CostUSD: pricing.Cost(route.Model, pricing.Tokens{
-			Prompt:     u.prompt,
-			Completion: u.completion,
-			Cached:     u.cached,
-			CacheWrite: u.cacheWrite,
-			Reasoning:  u.reasoning,
-		}),
+		CostUSD:          cost,
 	}
 
 	// Detached context: the caller's request may already be cancelled by the
@@ -146,7 +157,7 @@ func embeddingUsage(reported *openai.Usage, req *openai.EmbeddingRequest) usage 
 // ctx — typically a client disconnect — ends the relay and still records what
 // was streamed before the hangup.
 func (e *Engine) meterStream(ctx context.Context, route Route, req *openai.ChatCompletionRequest, chunks <-chan openai.StreamChunk, meta callMeta) <-chan openai.StreamChunk {
-	if e.recorder == nil && e.usage == nil {
+	if e.recorder == nil && e.usage == nil && meta.trace == nil {
 		return chunks
 	}
 
@@ -157,6 +168,7 @@ func (e *Engine) meterStream(ctx context.Context, route Route, req *openai.ChatC
 		var (
 			reported  *openai.Usage
 			completed int
+			hungUp    bool
 		)
 	relay:
 		for chunk := range chunks {
@@ -172,18 +184,27 @@ func (e *Engine) meterStream(ctx context.Context, route Route, req *openai.ChatC
 			case out <- chunk:
 			case <-ctx.Done():
 				// The consumer is gone; stop forwarding but still meter.
+				hungUp = true
 				break relay
 			}
 		}
 
 		if reported != nil && (reported.PromptTokens > 0 || reported.CompletionTokens > 0) {
 			e.recordUsage(route, fromReported(reported), true, meta)
-			return
+		} else {
+			e.recordUsage(route, usage{
+				prompt:     estimatePrompt(req),
+				completion: tokensFromChars(completed),
+			}, true, meta)
 		}
-		e.recordUsage(route, usage{
-			prompt:     estimatePrompt(req),
-			completion: tokensFromChars(completed),
-		}, true, meta)
+
+		// The trace closes with the relay, not when the channel was handed
+		// back: a stream's outcome is only known once its last token landed.
+		status := "ok"
+		if hungUp {
+			status = "canceled"
+		}
+		e.finishTrace(meta.trace, status)
 	}()
 	return out
 }

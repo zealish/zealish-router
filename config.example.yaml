@@ -39,6 +39,16 @@ router:
     # How long a tripped provider is skipped before one probe request is
     # allowed through to test whether it recovered.
     cooldown: 30s
+  # The background health check pings every provider's /models endpoint so a
+  # dead upstream is taken out of rotation without any request paying for the
+  # discovery. An unhealthy provider is skipped by the fallback chain until it
+  # passes a probe again.
+  health_check:
+    enabled: true
+    # How often every provider is pinged. 30-60s is a sensible range.
+    interval: 30s
+    # Deadline for a single ping.
+    timeout: 5s
 
 # The admin API is the dashboard's backend and can reconfigure routing, so it
 # ships disabled. Enable it with a token you generate yourself — anything

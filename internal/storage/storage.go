@@ -74,6 +74,9 @@ const (
 	ComboFallback ComboStrategy = "fallback"
 	// ComboRoundRobin rotates the starting member per request, then cascades.
 	ComboRoundRobin ComboStrategy = "round_robin"
+	// ComboWeighted rotates the starting member per request in proportion to
+	// the member weights, then cascades.
+	ComboWeighted ComboStrategy = "weighted"
 )
 
 // Combo is a virtual model: one client-facing name backed by an ordered pool
@@ -82,7 +85,10 @@ type Combo struct {
 	Name     string
 	Strategy ComboStrategy
 	Members  []string
-	Enabled  bool
+	// Weights holds one share per member, used by ComboWeighted. It is either
+	// empty — every member weighs the same — or exactly as long as Members.
+	Weights []int
+	Enabled bool
 }
 
 // Proxy is one outbound proxy endpoint in the pool. URL carries the scheme
@@ -233,6 +239,88 @@ type UsageStore interface {
 	Prune(ctx context.Context, before time.Time) (int64, error)
 }
 
+// RequestTrace is the summary of one gateway request: a single row however
+// many providers the fallback chain walked. It holds routing metadata only —
+// never prompt or completion content.
+type RequestTrace struct {
+	// RequestID is the gateway-assigned identifier the client also sees.
+	RequestID string
+	CreatedAt time.Time
+	// KeyID attributes the request to the API key that authenticated it.
+	// Empty means unattributed, exactly as on UsageEvent.
+	KeyID string
+	// Model is the name the client asked for: an alias or a combo.
+	Model    string
+	Streamed bool
+	// TotalLatency covers the whole request, including retries and backoff.
+	TotalLatency time.Duration
+	TotalTokens  int
+	TotalCostUSD float64
+	// FinalProvider and FinalAlias name the route that produced the outcome.
+	FinalProvider string
+	FinalAlias    string
+	// FinalStatus is "ok" or the failure class of the last attempt.
+	FinalStatus string
+	// Attempts is the ordered timeline. The list view leaves it empty on
+	// purpose; Get always fills it.
+	Attempts []RequestAttempt
+	// AttemptCount is how many upstream calls the request made. It is stored
+	// on the summary row so the list view needs no join.
+	AttemptCount int
+}
+
+// RequestAttempt is one upstream call inside a trace.
+type RequestAttempt struct {
+	// Seq is the 1-based position of this attempt within its trace.
+	Seq       int
+	StartedAt time.Time
+	// Alias is the route chosen for this attempt: the alias itself, or the
+	// combo member that was picked.
+	Alias    string
+	Provider string
+	// Model is the upstream model name the provider was called with.
+	Model   string
+	Latency time.Duration
+	// Status is "ok" or a failure class: timeout, rate_limited, upstream_5xx,
+	// connection, client_error or canceled.
+	Status string
+	// Retry marks a repeat of the same route; Fallback marks a move onto the
+	// next route in the chain. The first attempt is neither.
+	Retry    bool
+	Fallback bool
+	// Error is the upstream message, truncated. Empty on success.
+	Error string
+}
+
+// TraceFilter narrows a trace listing. Zero values mean "no filter".
+type TraceFilter struct {
+	// Status matches FinalStatus exactly.
+	Status string
+	// Model matches the requested model name exactly.
+	Model string
+	// Provider matches any provider the request attempted, not only the final
+	// one: a trace that fell back off a provider is still a trace about it.
+	Provider string
+	KeyID    string
+	// Limit and Offset paginate the newest-first listing.
+	Limit  int
+	Offset int
+}
+
+// TraceStore persists request traces and their attempts.
+type TraceStore interface {
+	// Record writes a trace and its attempts as one unit. Re-recording the
+	// same request id replaces the previous trace.
+	Record(ctx context.Context, t RequestTrace) error
+	// List returns traces newest-first with their attempts, plus the total
+	// number of traces matching the filter before pagination.
+	List(ctx context.Context, f TraceFilter) ([]RequestTrace, int, error)
+	// Get returns one trace with every attempt in sequence order.
+	Get(ctx context.Context, requestID string) (RequestTrace, error)
+	// Prune deletes traces older than a cutoff and reports how many went.
+	Prune(ctx context.Context, before time.Time) (int64, error)
+}
+
 // Store aggregates every persistence contract of the application.
 type Store interface {
 	APIKeys() APIKeyStore
@@ -242,6 +330,7 @@ type Store interface {
 	Proxies() ProxyStore
 	Settings() SettingStore
 	Usage() UsageStore
+	Traces() TraceStore
 	Close() error
 }
 
@@ -254,6 +343,7 @@ type Memory struct {
 	proxies   *memoryProxies
 	settings  *memorySettings
 	usage     *memoryUsage
+	traces    *memoryTraces
 }
 
 // NewMemory constructs an empty in-memory store.
@@ -261,6 +351,7 @@ func NewMemory() *Memory {
 	models := &memoryModels{items: map[string]ModelAlias{}}
 	combos := &memoryCombos{items: map[string]Combo{}}
 	usage := &memoryUsage{}
+	traces := &memoryTraces{}
 	return &Memory{
 		keys:      &memoryAPIKeys{items: map[string]APIKey{}},
 		providers: &memoryProviders{items: map[string]Provider{}, models: models, combos: combos, usage: usage},
@@ -269,6 +360,7 @@ func NewMemory() *Memory {
 		proxies:   &memoryProxies{items: map[string]Proxy{}},
 		settings:  &memorySettings{items: map[string]string{}},
 		usage:     usage,
+		traces:    traces,
 	}
 }
 
@@ -292,6 +384,9 @@ func (m *Memory) Settings() SettingStore { return m.settings }
 
 // Usage implements Store.
 func (m *Memory) Usage() UsageStore { return m.usage }
+
+// Traces implements Store.
+func (m *Memory) Traces() TraceStore { return m.traces }
 
 // Close implements Store.
 func (m *Memory) Close() error { return nil }
@@ -536,7 +631,8 @@ func (s *memoryCombos) Delete(_ context.Context, name string) error {
 }
 
 // pruneMembers strips deleted aliases from every combo pool, dropping combos
-// left without a single member.
+// left without a single member. Weights are positional, so they follow the
+// members they belong to.
 func (s *memoryCombos) pruneMembers(dropped map[string]bool) {
 	if len(dropped) == 0 {
 		return
@@ -546,9 +642,14 @@ func (s *memoryCombos) pruneMembers(dropped map[string]bool) {
 
 	for name, c := range s.items {
 		kept := make([]string, 0, len(c.Members))
-		for _, member := range c.Members {
-			if !dropped[member] {
-				kept = append(kept, member)
+		keptWeights := make([]int, 0, len(c.Weights))
+		for i, member := range c.Members {
+			if dropped[member] {
+				continue
+			}
+			kept = append(kept, member)
+			if i < len(c.Weights) {
+				keptWeights = append(keptWeights, c.Weights[i])
 			}
 		}
 		if len(kept) == len(c.Members) {
@@ -559,6 +660,7 @@ func (s *memoryCombos) pruneMembers(dropped map[string]bool) {
 			continue
 		}
 		c.Members = kept
+		c.Weights = keptWeights
 		s.items[name] = c
 	}
 }
@@ -854,5 +956,111 @@ func (s *memoryUsage) Prune(_ context.Context, before time.Time) (int64, error) 
 		kept = append(kept, e)
 	}
 	s.events = kept
+	return removed, nil
+}
+
+// memoryTraces keeps traces in insertion order, like memoryUsage: the
+// in-memory store never holds enough of them for the linear scans to matter.
+type memoryTraces struct {
+	mu    sync.RWMutex
+	items []RequestTrace
+}
+
+func (s *memoryTraces) Record(_ context.Context, t RequestTrace) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	t.AttemptCount = len(t.Attempts)
+	for i := range s.items {
+		if s.items[i].RequestID == t.RequestID {
+			s.items[i] = t
+			return nil
+		}
+	}
+	s.items = append(s.items, t)
+	return nil
+}
+
+func (s *memoryTraces) List(_ context.Context, f TraceFilter) ([]RequestTrace, int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	matched := make([]RequestTrace, 0, len(s.items))
+	for _, t := range s.items {
+		if traceMatches(t, f) {
+			matched = append(matched, t)
+		}
+	}
+	sort.SliceStable(matched, func(i, j int) bool {
+		return matched[i].CreatedAt.After(matched[j].CreatedAt)
+	})
+	total := len(matched)
+
+	if f.Offset >= len(matched) {
+		return nil, total, nil
+	}
+	matched = matched[f.Offset:]
+	if f.Limit > 0 && f.Limit < len(matched) {
+		matched = matched[:f.Limit]
+	}
+
+	// The list view reads summaries; attempts belong to Get.
+	out := make([]RequestTrace, 0, len(matched))
+	for _, t := range matched {
+		t.Attempts = nil
+		out = append(out, t)
+	}
+	return out, total, nil
+}
+
+// traceMatches applies every set filter. Provider reaches into the attempts so
+// a request that fell back off a provider still counts as a trace about it.
+func traceMatches(t RequestTrace, f TraceFilter) bool {
+	if f.Status != "" && t.FinalStatus != f.Status {
+		return false
+	}
+	if f.Model != "" && t.Model != f.Model {
+		return false
+	}
+	if f.KeyID != "" && t.KeyID != f.KeyID {
+		return false
+	}
+	if f.Provider == "" {
+		return true
+	}
+	for _, a := range t.Attempts {
+		if a.Provider == f.Provider {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *memoryTraces) Get(_ context.Context, requestID string) (RequestTrace, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	for _, t := range s.items {
+		if t.RequestID == requestID {
+			return t, nil
+		}
+	}
+	return RequestTrace{}, ErrNotFound
+}
+
+func (s *memoryTraces) Prune(_ context.Context, before time.Time) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	kept := s.items[:0]
+	var removed int64
+	for _, t := range s.items {
+		if t.CreatedAt.Before(before) {
+			removed++
+			continue
+		}
+		kept = append(kept, t)
+	}
+	s.items = kept
 	return removed, nil
 }

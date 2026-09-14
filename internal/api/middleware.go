@@ -1,6 +1,8 @@
 package api
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -13,7 +15,34 @@ import (
 
 	"github.com/zealish/zealish-router/internal/auth"
 	"github.com/zealish/zealish-router/internal/metrics"
+	"github.com/zealish/zealish-router/internal/router"
 )
+
+// requestIDBytes is the entropy behind a gateway request id. Sixteen bytes is
+// the same width as a UUID, so ids stay collision-free across the retention
+// window without coordinating a counter.
+const requestIDBytes = 16
+
+// traceRequests assigns every gateway request a unique id, hands it to the
+// routing engine through the context, and echoes it back so a caller can
+// correlate their own logs with the trace. Chi's own RequestID is host-scoped
+// and contains a slash, which makes it unusable as a path segment.
+func traceRequests() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			id := newRequestID()
+			w.Header().Set("X-Request-Id", id)
+			next.ServeHTTP(w, r.WithContext(router.WithRequestID(r.Context(), id)))
+		})
+	}
+}
+
+func newRequestID() string {
+	buf := make([]byte, requestIDBytes)
+	// rand.Read never fails on any supported platform; it panics instead.
+	_, _ = rand.Read(buf)
+	return hex.EncodeToString(buf)
+}
 
 func requestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {

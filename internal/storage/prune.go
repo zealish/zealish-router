@@ -22,6 +22,17 @@ const pruneTimeout = 30 * time.Second
 // The first sweep runs at once so a restart with a shortened retention window
 // takes effect without waiting for a tick.
 func PruneUsage(ctx context.Context, usage UsageStore, retention time.Duration, logger *slog.Logger) {
+	pruneEvery(ctx, "usage log", usage.Prune, retention, logger)
+}
+
+// PruneTraces deletes request traces older than retention on the same schedule
+// and with the same semantics as PruneUsage. Attempts follow their trace.
+func PruneTraces(ctx context.Context, traces TraceStore, retention time.Duration, logger *slog.Logger) {
+	pruneEvery(ctx, "request traces", traces.Prune, retention, logger)
+}
+
+// pruneEvery runs remove on the retention cutoff until ctx is cancelled.
+func pruneEvery(ctx context.Context, label string, remove func(context.Context, time.Time) (int64, error), retention time.Duration, logger *slog.Logger) {
 	if retention <= 0 {
 		return
 	}
@@ -30,12 +41,12 @@ func PruneUsage(ctx context.Context, usage UsageStore, retention time.Duration, 
 		swept, cancel := context.WithTimeout(ctx, pruneTimeout)
 		defer cancel()
 
-		removed, err := usage.Prune(swept, time.Now().Add(-retention))
+		removed, err := remove(swept, time.Now().Add(-retention))
 		switch {
 		case err != nil:
-			logger.Warn("usage log prune failed", slog.Any("error", err))
+			logger.Warn(label+" prune failed", slog.Any("error", err))
 		case removed > 0:
-			logger.Info("usage log pruned",
+			logger.Info(label+" pruned",
 				slog.Int64("removed", removed),
 				slog.Duration("retention", retention))
 		}

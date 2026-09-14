@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -52,6 +53,9 @@ func (h *adminHandler) routes(r chi.Router) {
 	r.Get("/usage/leaderboard", h.usageLeaderboard)
 	r.Get("/usage/keys", h.usageByKey)
 
+	r.Get("/requests", h.listRequests)
+	r.Get("/requests/{request_id}", h.getRequest)
+
 	r.Get("/keys", h.listKeys)
 	r.Post("/keys", h.createKey)
 	r.Delete("/keys/{id}", h.deleteKey)
@@ -63,6 +67,7 @@ func (h *adminHandler) routes(r chi.Router) {
 	r.Delete("/providers/{name}", h.deleteProvider)
 	r.Get("/providers/{name}/catalog", h.providerCatalog)
 	r.Post("/providers/{name}/import", h.importModels)
+	r.Get("/providers/{name}/metrics", h.providerMetrics)
 
 	r.Get("/models", h.listAliases)
 	r.Put("/models/{alias}", h.putAlias)
@@ -540,6 +545,93 @@ func (h *adminHandler) deleteProvider(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// --- provider health metrics ---
+
+type aliasMetricsResponse struct {
+	Alias string `json:"alias"`
+	// P95MS is null until the window holds enough samples to estimate a tail.
+	TTFBMS      int64             `json:"ttfb_ms"`
+	P50MS       int64             `json:"p50_ms"`
+	P95MS       *int64            `json:"p95_ms"`
+	SuccessRate float64           `json:"success_rate"`
+	Requests    int               `json:"requests"`
+	Confidence  router.Confidence `json:"confidence"`
+	UpdatedAt   time.Time         `json:"updated_at"`
+}
+
+// summaryMetricsResponse aggregates every alias of the provider. It is pooled
+// over all requests, not averaged across aliases.
+type summaryMetricsResponse struct {
+	TTFBMS      int64             `json:"ttfb_ms"`
+	P50MS       int64             `json:"p50_ms"`
+	P95MS       *int64            `json:"p95_ms"`
+	SuccessRate float64           `json:"success_rate"`
+	Requests    int               `json:"requests"`
+	Confidence  router.Confidence `json:"confidence"`
+}
+
+type providerMetricsResponse struct {
+	Aliases []aliasMetricsResponse  `json:"aliases"`
+	Summary *summaryMetricsResponse `json:"summary"`
+}
+
+// providerMetrics reports the rolling request window of every alias routed to
+// a provider. Aliases that have not served a request since the process started
+// are omitted: the window is in-memory, and a zeroed row would read as a
+// perfect route rather than an unmeasured one.
+func (h *adminHandler) providerMetrics(w http.ResponseWriter, r *http.Request) {
+	name := urlParam(r, "name")
+
+	aliases, err := h.store.Models().List(r.Context())
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+
+	out := make([]aliasMetricsResponse, 0, len(aliases))
+	names := make([]string, 0, len(aliases))
+	for _, m := range aliases {
+		if m.Provider != name {
+			continue
+		}
+		names = append(names, m.Alias)
+
+		stats, ok := h.engine.AliasStats(m.Alias)
+		if !ok {
+			continue
+		}
+		out = append(out, aliasMetricsResponse{
+			Alias:       stats.Alias,
+			TTFBMS:      stats.TTFBMs,
+			P50MS:       stats.P50Ms,
+			P95MS:       stats.P95Ms,
+			SuccessRate: roundRate(stats.SuccessRate),
+			Requests:    stats.Requests,
+			Confidence:  stats.Confidence,
+			UpdatedAt:   stats.UpdatedAt.UTC(),
+		})
+	}
+
+	resp := providerMetricsResponse{Aliases: out}
+	if summary, ok := h.engine.Stats().Summary(names); ok {
+		resp.Summary = &summaryMetricsResponse{
+			TTFBMS:      summary.TTFBMs,
+			P50MS:       summary.P50Ms,
+			P95MS:       summary.P95Ms,
+			SuccessRate: roundRate(summary.SuccessRate),
+			Requests:    summary.Requests,
+			Confidence:  summary.Confidence,
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// roundRate trims a success rate to one decimal, which is all the dashboard
+// renders.
+func roundRate(rate float64) float64 {
+	return math.Round(rate*10) / 10
+}
+
 // --- upstream model catalogue ---
 
 type catalogModelResponse struct {
@@ -784,6 +876,7 @@ type testAliasResponse struct {
 	Model     string `json:"model"`
 	OK        bool   `json:"ok"`
 	LatencyMS int64  `json:"latency_ms"`
+	TTFBMS    int64  `json:"ttfb_ms"`
 	Error     string `json:"error,omitempty"`
 }
 
@@ -793,6 +886,8 @@ const testAliasTimeout = 30 * time.Second
 // testAlias sends a minimal completion straight to the alias's own provider and
 // reports the round-trip latency. It deliberately bypasses the fallback chain:
 // the point is to check this route, not whether some other one can cover it.
+// The probe is a real request, so it joins the alias's rolling window —
+// appended to it, never replacing the history already there.
 func (h *adminHandler) testAlias(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	alias := urlParam(r, "alias")
@@ -819,14 +914,27 @@ func (h *adminHandler) testAlias(w http.ResponseWriter, r *http.Request) {
 		MaxTokens: &maxTokens,
 	}
 
+	ctx, firstByte := provider.WithFirstByte(ctx)
 	start := time.Now()
 	_, err = h.providerClient(ctx, providerRecord).ChatCompletion(ctx, req)
+	latency := time.Since(start)
+	ttfb := firstByte.Since(start)
+
+	h.engine.Stats().Record(router.RequestMetric{
+		Alias:     alias,
+		Success:   err == nil,
+		TTFBMs:    ttfb.Milliseconds(),
+		LatencyMs: latency.Milliseconds(),
+		Timestamp: time.Now(),
+	})
+
 	resp := testAliasResponse{
 		Alias:     alias,
 		Provider:  record.Provider,
 		Model:     record.Model,
 		OK:        err == nil,
-		LatencyMS: time.Since(start).Milliseconds(),
+		LatencyMS: latency.Milliseconds(),
+		TTFBMS:    ttfb.Milliseconds(),
 	}
 	if err != nil {
 		h.logger.Warn("alias test failed",
@@ -850,12 +958,14 @@ type comboResponse struct {
 	Name     string   `json:"name"`
 	Strategy string   `json:"strategy"`
 	Members  []string `json:"members"`
+	Weights  []int    `json:"weights"`
 	Enabled  bool     `json:"enabled"`
 }
 
 type comboRequest struct {
 	Strategy string   `json:"strategy"`
 	Members  []string `json:"members"`
+	Weights  []int    `json:"weights"`
 	Enabled  *bool    `json:"enabled"`
 }
 
@@ -888,10 +998,32 @@ func (h *adminHandler) putCombo(w http.ResponseWriter, r *http.Request) {
 	if strategy == "" {
 		strategy = storage.ComboFallback
 	}
-	if strategy != storage.ComboFallback && strategy != storage.ComboRoundRobin {
+	switch strategy {
+	case storage.ComboFallback, storage.ComboRoundRobin, storage.ComboWeighted:
+	default:
 		writeError(w, http.StatusBadRequest, "invalid_request_error",
-			"Field 'strategy' must be 'fallback' or 'round_robin'.")
+			"Field 'strategy' must be 'fallback', 'round_robin' or 'weighted'.")
 		return
+	}
+
+	weights := req.Weights
+	if strategy != storage.ComboWeighted {
+		// Weights only mean something to the weighted strategy; storing them
+		// for the others would leave stale shares behind a strategy switch.
+		weights = nil
+	} else if len(weights) > 0 {
+		if len(weights) != len(req.Members) {
+			writeError(w, http.StatusBadRequest, "invalid_request_error",
+				"Field 'weights' must have one entry per member.")
+			return
+		}
+		for _, weight := range weights {
+			if weight < 1 {
+				writeError(w, http.StatusBadRequest, "invalid_request_error",
+					"Field 'weights' must hold positive integers.")
+				return
+			}
+		}
 	}
 
 	ctx := r.Context()
@@ -921,6 +1053,7 @@ func (h *adminHandler) putCombo(w http.ResponseWriter, r *http.Request) {
 		Name:     name,
 		Strategy: strategy,
 		Members:  req.Members,
+		Weights:  weights,
 		Enabled:  req.Enabled == nil || *req.Enabled,
 	}
 	if err := h.store.Combos().Put(ctx, record); err != nil {
@@ -952,10 +1085,15 @@ func toComboResponse(c storage.Combo) comboResponse {
 	if members == nil {
 		members = []string{}
 	}
+	weights := c.Weights
+	if weights == nil {
+		weights = []int{}
+	}
 	return comboResponse{
 		Name:     c.Name,
 		Strategy: string(c.Strategy),
 		Members:  members,
+		Weights:  weights,
 		Enabled:  c.Enabled,
 	}
 }

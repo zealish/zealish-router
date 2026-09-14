@@ -73,8 +73,11 @@ type Engine struct {
 	logger   *slog.Logger
 	recorder Recorder
 	usage    storage.UsageStore
+	traces   storage.TraceStore
 	retry    Retry
 	breakers *breakers
+	probes   *probes
+	stats    *Stats
 }
 
 // usageWriteTimeout bounds a single usage-log insert. It runs off the request's
@@ -89,6 +92,8 @@ func NewEngine(logger *slog.Logger, rec Recorder) *Engine {
 		recorder: rec,
 		retry:    DefaultRetry,
 		breakers: newBreakers(DefaultBreaker),
+		probes:   newProbes(),
+		stats:    NewStats(),
 	}
 	e.breakers.onTransition = e.onCircuitChange
 	e.Reload(nil, nil, provider.NewRegistry())
@@ -115,6 +120,12 @@ func (e *Engine) onCircuitChange(providerName string, state CircuitState) {
 // persistence, which is what tests and the metrics-only path want.
 func (e *Engine) SetUsageStore(s storage.UsageStore) {
 	e.usage = s
+}
+
+// SetTraceStore installs the durable request-trace log. A nil store disables
+// tracing, which is what the metrics-only path and most tests want.
+func (e *Engine) SetTraceStore(s storage.TraceStore) {
+	e.traces = s
 }
 
 // Reload swaps the routing table for one built from the given aliases, combos
@@ -171,9 +182,18 @@ func (e *Engine) Resolve(name string) (Route, error) {
 
 // Health reports the circuit state of every provider the engine has observed.
 // Providers that have never been called are absent: they are healthy by
-// definition, and the caller knows the full provider list already.
+// definition, and the caller knows the full provider list already. A provider
+// that failed its last health probe is reported as open.
 func (e *Engine) Health() map[string]ProviderHealth {
-	return e.breakers.snapshot()
+	out := e.breakers.snapshot()
+	for name, err := range e.probes.snapshot() {
+		h := out[name]
+		h.Provider = name
+		h.State = CircuitOpen
+		h.LastProbeError = err.Error()
+		out[name] = h
+	}
+	return out
 }
 
 func (rt *routes) resolve(name string) (Route, error) {
@@ -233,30 +253,67 @@ func (rt *routes) entrypoints(name string) []string {
 	if !ok {
 		return []string{name}
 	}
-	if combo.Strategy != storage.ComboRoundRobin {
+
+	switch combo.Strategy {
+	case storage.ComboRoundRobin:
+		// Round-robin only moves the starting point: the rest of the pool
+		// still follows in order, so a busy member is skipped rather than
+		// retried.
+		return rotate(combo.Members, int(rt.cursors[name].Add(1)-1)%len(combo.Members))
+	case storage.ComboWeighted:
+		return rotate(combo.Members, weightedPick(combo.Members, combo.Weights, rt.cursors[name].Add(1)-1))
+	default:
 		return combo.Members
 	}
+}
 
-	// Round-robin only moves the starting point: the rest of the pool still
-	// follows in order, so a busy member is skipped rather than retried.
-	n := len(combo.Members)
-	start := int(rt.cursors[name].Add(1)-1) % n
+// rotate returns members starting at index start, wrapping around, so the rest
+// of the pool stays available as fallback.
+func rotate(members []string, start int) []string {
+	n := len(members)
 	ordered := make([]string, 0, n)
 	for i := range n {
-		ordered = append(ordered, combo.Members[(start+i)%n])
+		ordered = append(ordered, members[(start+i)%n])
 	}
 	return ordered
+}
+
+// weightedPick chooses a starting member for tick: the cursor walks a cycle of
+// total-weight slots, so over each cycle a member starts exactly as often as
+// its weight. A missing or non-positive weight counts as one, so a
+// half-configured pool still spreads traffic.
+func weightedPick(members []string, weights []int, tick uint64) int {
+	total := 0
+	for i := range members {
+		total += weightAt(weights, i)
+	}
+
+	offset := int(tick % uint64(total))
+	for i := range members {
+		offset -= weightAt(weights, i)
+		if offset < 0 {
+			return i
+		}
+	}
+	return 0
+}
+
+func weightAt(weights []int, i int) int {
+	if i >= len(weights) || weights[i] < 1 {
+		return 1
+	}
+	return weights[i]
 }
 
 // ChatCompletion routes a non-streaming completion request, advancing through
 // the fallback chain on retryable upstream failures.
 func (e *Engine) ChatCompletion(ctx context.Context, req *openai.ChatCompletionRequest) (*openai.ChatCompletionResponse, error) {
-	meta := metaFrom(ctx, time.Now())
-	return dispatch(ctx, e, req.Model, false, meta, func(p provider.Provider, route Route) (*openai.ChatCompletionResponse, error) {
+	meta := beginRequest(ctx, req.Model, false)
+	return dispatch(ctx, e, req.Model, false, meta, func(callCtx context.Context, _ measured, p provider.Provider, route Route) (*openai.ChatCompletionResponse, error) {
 		upstream := *req
 		upstream.Model = route.Model
 
-		resp, err := p.ChatCompletion(ctx, &upstream)
+		resp, err := p.ChatCompletion(callCtx, &upstream)
 		if err != nil {
 			return nil, err
 		}
@@ -269,28 +326,28 @@ func (e *Engine) ChatCompletion(ctx context.Context, req *openai.ChatCompletionR
 // only while establishing the stream: once the channel is handed back the first
 // chunk may already be in flight, so the response is committed.
 func (e *Engine) ChatCompletionStream(ctx context.Context, req *openai.ChatCompletionRequest) (<-chan openai.StreamChunk, error) {
-	meta := metaFrom(ctx, time.Now())
-	return dispatch(ctx, e, req.Model, true, meta, func(p provider.Provider, route Route) (<-chan openai.StreamChunk, error) {
+	meta := beginRequest(ctx, req.Model, true)
+	return dispatch(ctx, e, req.Model, true, meta, func(callCtx context.Context, m measured, p provider.Provider, route Route) (<-chan openai.StreamChunk, error) {
 		upstream := *req
 		upstream.Model = route.Model
 
-		chunks, err := p.ChatCompletionStream(ctx, &upstream)
+		chunks, err := p.ChatCompletionStream(callCtx, &upstream)
 		if err != nil {
 			return nil, err
 		}
-		return e.meterStream(ctx, route, &upstream, chunks, meta), nil
+		return e.meterLatency(ctx, route, m, e.meterStream(ctx, route, &upstream, chunks, meta)), nil
 	})
 }
 
 // Embeddings routes an embeddings request through the same alias, fallback and
 // retry machinery as a completion. There is no streaming variant.
 func (e *Engine) Embeddings(ctx context.Context, req *openai.EmbeddingRequest) (*openai.EmbeddingResponse, error) {
-	meta := metaFrom(ctx, time.Now())
-	return dispatch(ctx, e, req.Model, false, meta, func(p provider.Provider, route Route) (*openai.EmbeddingResponse, error) {
+	meta := beginRequest(ctx, req.Model, false)
+	return dispatch(ctx, e, req.Model, false, meta, func(callCtx context.Context, _ measured, p provider.Provider, route Route) (*openai.EmbeddingResponse, error) {
 		upstream := *req
 		upstream.Model = route.Model
 
-		resp, err := p.Embeddings(ctx, &upstream)
+		resp, err := p.Embeddings(callCtx, &upstream)
 		if err != nil {
 			return nil, err
 		}
@@ -303,7 +360,7 @@ func (e *Engine) Embeddings(ctx context.Context, req *openai.EmbeddingRequest) (
 // according to the engine policy, and returns the first successful result.
 // A request that fails after reaching at least one provider is appended to the
 // usage log with its failure class so totals count every hit on a model.
-func dispatch[T any](ctx context.Context, e *Engine, model string, streamed bool, meta callMeta, call func(provider.Provider, Route) (T, error)) (T, error) {
+func dispatch[T any](ctx context.Context, e *Engine, model string, streamed bool, meta callMeta, call func(context.Context, measured, provider.Provider, Route) (T, error)) (T, error) {
 	var zero T
 
 	// Pin one snapshot for the whole walk: a reload mid-chain must not move
@@ -314,12 +371,17 @@ func dispatch[T any](ctx context.Context, e *Engine, model string, streamed bool
 	var lastRoute Route
 	attempted := false
 
-	for _, alias := range chain {
+	for i, alias := range chain {
+		// Every route after the first is reached by falling back off the one
+		// before it, whatever made that one fail.
+		fallback := i > 0
+
 		p, route, err := rt.pick(alias)
 		if err != nil {
 			if alias == model {
 				// The requested alias itself is unroutable: terminal. A combo
 				// never matches here, so its members are all skippable.
+				e.finishTrace(meta.trace, classify(err))
 				return zero, err
 			}
 			e.logger.Warn("skipping unroutable route",
@@ -340,48 +402,82 @@ func dispatch[T any](ctx context.Context, e *Engine, model string, streamed bool
 				slog.String("provider", route.Provider))
 			e.record(route.Provider, "circuit_open")
 			lastErr = fmt.Errorf("%w: %s", ErrCircuitOpen, route.Provider)
+			meta.trace.skipped(route, "circuit_open", lastErr, fallback)
+			continue
+		}
+
+		// A provider that failed its last background health probe is skipped
+		// the same way: unhealthy means known-down, so waiting for this
+		// request to fail would only add latency.
+		if skipErr := e.skipUnhealthy(route.Provider); skipErr != nil {
+			e.logger.Warn("skipping unhealthy route",
+				slog.String("requested", model),
+				slog.String("alias", alias),
+				slog.String("provider", route.Provider))
+			e.record(route.Provider, "unhealthy")
+			lastErr = skipErr
+			meta.trace.skipped(route, "unhealthy", skipErr, fallback)
 			continue
 		}
 
 		lastRoute, attempted = route, true
 
-		result, err := attempt(ctx, e, route, func() (T, error) { return call(p, route) })
+		callCtx, m := measure(ctx)
+		result, err := attempt(ctx, e, route, meta, fallback, func() (T, error) { return call(callCtx, m, p, route) })
 		if err == nil {
+			// A stream reports itself once it drains: its latency is the time
+			// to the last token, not the time to open the channel. Its trace
+			// closes with it, for the same reason.
+			if !streamed {
+				e.recordMetric(route, true, m.ttfb(), time.Since(m.start))
+				e.finishTrace(meta.trace, "ok")
+			}
 			return result, nil
 		}
 		lastErr = err
+		e.recordMetric(route, false, m.ttfb(), time.Since(m.start))
 
 		if !provider.Retryable(err) {
 			e.recordFailure(route, streamed, classify(err), meta)
+			e.finishTrace(meta.trace, classify(err))
 			return zero, err
 		}
 		if ctx.Err() != nil {
 			e.recordFailure(route, streamed, classify(ctx.Err()), meta)
+			e.finishTrace(meta.trace, classify(ctx.Err()))
 			return zero, ctx.Err()
 		}
 	}
 
 	if lastErr == nil {
-		return zero, fmt.Errorf("%w: %s", ErrUnknownModel, model)
+		err := fmt.Errorf("%w: %s", ErrUnknownModel, model)
+		e.finishTrace(meta.trace, classify(err))
+		return zero, err
 	}
 	if attempted {
 		e.recordFailure(lastRoute, streamed, classify(lastErr), meta)
 	}
+	e.finishTrace(meta.trace, classify(lastErr))
 	return zero, fmt.Errorf("%w: %w", ErrChainExhausted, lastErr)
 }
 
 // attempt runs call against one route with bounded retries and exponential
-// backoff plus jitter. It records and logs every failed try.
-func attempt[T any](ctx context.Context, e *Engine, route Route, call func() (T, error)) (T, error) {
+// backoff plus jitter. It records and logs every failed try, and appends every
+// try — successful or not — to the request's trace.
+func attempt[T any](ctx context.Context, e *Engine, route Route, meta callMeta, fallback bool, call func() (T, error)) (T, error) {
 	var zero T
 
 	attempts := max(e.retry.Attempts, 1)
 	var lastErr error
 
 	for i := 1; i <= attempts; i++ {
+		// Only the first try of the first route is neither: a repeat of this
+		// route is a retry, and reaching this route at all may be a fallback.
+		started := time.Now()
 		result, err := call()
 		if err == nil {
 			e.breakers.success(route.Provider)
+			meta.trace.attempt(route, started, time.Since(started), "ok", nil, i > 1, fallback)
 			return result, nil
 		}
 		lastErr = err
@@ -394,6 +490,7 @@ func attempt[T any](ctx context.Context, e *Engine, route Route, call func() (T,
 
 		reason := classify(err)
 		e.record(route.Provider, reason)
+		meta.trace.attempt(route, started, time.Since(started), reason, err, i > 1, fallback)
 		e.logger.Warn("provider attempt failed",
 			slog.String("alias", route.Alias),
 			slog.String("provider", route.Provider),

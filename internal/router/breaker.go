@@ -242,6 +242,9 @@ type ProviderHealth struct {
 	OpenedAt time.Time `json:"opened_at,omitempty"`
 	// RetryAt is when the next probe is admitted. Zero unless open.
 	RetryAt time.Time `json:"retry_at,omitempty"`
+	// LastProbeError is the failure of the most recent background health
+	// probe. Empty while the provider is passing its probes.
+	LastProbeError string `json:"last_probe_error,omitempty"`
 }
 
 // snapshot reports the state of every provider the breaker has observed.

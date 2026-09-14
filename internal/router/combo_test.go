@@ -96,6 +96,84 @@ func TestComboRoundRobinRotatesStartingMember(t *testing.T) {
 	}
 }
 
+func TestComboWeightedSpreadsStartsByWeight(t *testing.T) {
+	e := newComboEngine(t,
+		storage.Combo{
+			Name:     "code-agent",
+			Strategy: storage.ComboWeighted,
+			Members:  []string{"gpt-5", "fast", "local"},
+			Weights:  []int{3, 1, 2},
+			Enabled:  true,
+		},
+		&fakeProvider{name: "openai"},
+		&fakeProvider{name: "openrouter"},
+		&fakeProvider{name: "ollama"},
+	)
+
+	served := map[string]int{}
+	for i := range 12 {
+		resp, err := e.ChatCompletion(context.Background(), &openai.ChatCompletionRequest{Model: "code-agent"})
+		if err != nil {
+			t.Fatalf("request %d: %v", i, err)
+		}
+		served[resp.ID]++
+	}
+
+	// Two full cycles of 3+1+2 slots.
+	want := map[string]int{"openai": 6, "openrouter": 2, "ollama": 4}
+	for name, count := range want {
+		if served[name] != count {
+			t.Errorf("%s served %d requests, want %d (got %v)", name, served[name], count, served)
+		}
+	}
+}
+
+func TestComboWeightedFallsBackToTheRestOfThePool(t *testing.T) {
+	e := newComboEngine(t,
+		storage.Combo{
+			Name:     "code-agent",
+			Strategy: storage.ComboWeighted,
+			Members:  []string{"gpt-5", "fast"},
+			Weights:  []int{5, 1},
+			Enabled:  true,
+		},
+		&fakeProvider{name: "openai", results: []error{upstreamErr(429, provider.ErrRateLimited)}},
+		&fakeProvider{name: "openrouter"},
+	)
+
+	resp, err := e.ChatCompletion(context.Background(), &openai.ChatCompletionRequest{Model: "code-agent"})
+	if err != nil {
+		t.Fatalf("ChatCompletion: %v", err)
+	}
+	if resp.ID != "openrouter" {
+		t.Errorf("served by %q, want openrouter", resp.ID)
+	}
+}
+
+func TestComboWeightedTreatsMissingWeightsAsEqual(t *testing.T) {
+	e := newComboEngine(t,
+		storage.Combo{
+			Name:     "code-agent",
+			Strategy: storage.ComboWeighted,
+			Members:  []string{"gpt-5", "fast"},
+			Enabled:  true,
+		},
+		&fakeProvider{name: "openai"},
+		&fakeProvider{name: "openrouter"},
+	)
+
+	want := []string{"openai", "openrouter", "openai"}
+	for i, served := range want {
+		resp, err := e.ChatCompletion(context.Background(), &openai.ChatCompletionRequest{Model: "code-agent"})
+		if err != nil {
+			t.Fatalf("request %d: %v", i, err)
+		}
+		if resp.ID != served {
+			t.Errorf("request %d served by %q, want %q", i, resp.ID, served)
+		}
+	}
+}
+
 func TestComboSkipsUnroutableMembers(t *testing.T) {
 	// "fast" has no registered provider, so the combo must move past it.
 	e := newComboEngine(t, fallbackCombo("fast", "local"), &fakeProvider{name: "ollama"})
