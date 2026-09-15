@@ -367,6 +367,50 @@ v1.1: quotas cap how much a key spends, the allowlist caps what it can reach.
 
 ---
 
+## v1.5 — Response Cache ✅
+
+### Cache core (`internal/cache`)
+- [x] LRU keyed on `sha256(endpoint ‖ model ‖ raw body)`, bounded by both a TTL
+      and a max entry count; fields delimited so boundaries are unambiguous
+- [x] A disabled cache is a nil `*Cache` whose every method is a no-op, so no
+      caller branches on enablement
+- [x] Counters for hits, misses, stores and evictions; `Purge` drops entries
+      and preserves the counters
+
+### Config
+- [x] `cache.enabled` / `cache.ttl` / `cache.max_entries`, off by default with
+      the TTL and size pre-filled so enabling takes one line
+- [x] Validation rejects an enabled cache with a non-positive TTL or size —
+      unbounded staleness or footprint is a misconfiguration, not a default
+
+### Request path
+- [x] Chat and embeddings buffer the raw body, key on it, and serve a hit
+      without touching an upstream
+- [x] Streaming bypasses the cache entirely: chunks are relayed, never buffered
+- [x] Failures are never admitted, so an upstream error is not replayed
+- [x] `X-Cache: HIT | MISS | BYPASS` on every response
+- [x] Handlers encode once and reuse the bytes for both the client and the
+      cache (`writeBody`)
+
+### Observability & admin
+- [x] `router_cache_events_total{endpoint,model,event}`
+- [x] `GET /api/v1/cache` — occupancy, capacity, counters, hit rate, TTL
+- [x] `DELETE /api/v1/cache` — purge, for an upstream that changed inside the
+      TTL window
+
+### Tests
+- [x] Cache: miss then hit, TTL expiry, LRU eviction order, replace refreshing
+      the TTL, purge preserving counters, nil-cache safety, key separation by
+      endpoint/model/body, concurrent access under `-race`
+- [x] HTTP: hit skips upstream and returns identical bytes, distinct bodies and
+      models miss, streaming bypasses, embeddings hit, endpoints never collide,
+      a failed request is not cached, a disabled cache always bypasses
+- [x] Admin: stats reflect hits and misses, purge empties the cache and forces
+      a refetch
+- [x] Config: defaults, YAML round-trip, unbounded settings rejected
+
+---
+
 ## Open Decisions
 
 | # | Decision | Options | Status |
@@ -381,15 +425,15 @@ v1.1: quotas cap how much a key spends, the allowlist caps what it can reach.
 
 ## Next Action
 
-**v1.4 is feature-complete.** A key is now scoped to both a spend ceiling and a
-model namespace. Suite is green under `-race` and the repo is lint-clean.
+**v1.5 is feature-complete.** A replayed prompt is now served from memory
+instead of an upstream. Suite is green under `-race` and the repo is
+lint-clean.
 
 Candidates for the next cycle, in the order they are recommended:
-- Response cache — an exact-match cache keyed on model and request body would
-  cut spend for agents that replay the same prompt, with streaming bypassed and
-  a TTL bounding staleness.
 - Per-provider budgets and alerts — the usage log and pricing table already
   hold everything needed to cap spend per provider or alias and notify on a
   threshold.
+- A cache panel on the dashboard — the admin endpoints are there, but the
+  hit rate is only visible over HTTP or Prometheus.
 - A real subcommand parser, the last unchecked v0.6 item, now that the CLI has
   grown past the flag handling it was written for.

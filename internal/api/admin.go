@@ -15,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/zealish/zealish-router/internal/auth"
+	"github.com/zealish/zealish-router/internal/cache"
 	"github.com/zealish/zealish-router/internal/metrics"
 	"github.com/zealish/zealish-router/internal/provider"
 	"github.com/zealish/zealish-router/internal/router"
@@ -31,6 +32,7 @@ type adminHandler struct {
 	engine  *router.Engine
 	metrics *metrics.Metrics
 	quota   *auth.Quota
+	cache   *cache.Cache
 	logger  *slog.Logger
 }
 
@@ -41,6 +43,7 @@ func newAdminHandler(deps Dependencies) *adminHandler {
 		engine:  deps.Engine,
 		metrics: deps.Metrics,
 		quota:   deps.Quota,
+		cache:   deps.Cache,
 		logger:  deps.Logger,
 	}
 }
@@ -85,8 +88,38 @@ func (h *adminHandler) routes(r chi.Router) {
 	r.Post("/proxies/import", h.importProxies)
 	r.Delete("/proxies/{name}", h.deleteProxy)
 
+	r.Get("/cache", h.cacheStats)
+	r.Delete("/cache", h.purgeCache)
+
 	r.Get("/settings", h.listSettings)
 	r.Put("/settings", h.putSettings)
+}
+
+// --- cache ---
+
+type cacheStatsResponse struct {
+	cache.Stats
+	Enabled bool    `json:"enabled"`
+	TTL     string  `json:"ttl"`
+	HitRate float64 `json:"hit_rate"`
+}
+
+func (h *adminHandler) cacheStats(w http.ResponseWriter, _ *http.Request) {
+	stats := h.cache.Stats()
+	writeJSON(w, http.StatusOK, cacheStatsResponse{
+		Stats:   stats,
+		Enabled: h.cache.Enabled(),
+		TTL:     h.cache.TTL().String(),
+		HitRate: stats.HitRate(),
+	})
+}
+
+// purgeCache drops every cached response. It is the escape hatch for a
+// provider that started returning something different within the TTL window.
+func (h *adminHandler) purgeCache(w http.ResponseWriter, _ *http.Request) {
+	dropped := h.cache.Purge()
+	h.logger.Info("response cache purged", slog.Int("entries", dropped))
+	writeJSON(w, http.StatusOK, map[string]int{"purged": dropped})
 }
 
 // --- overview ---

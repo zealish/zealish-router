@@ -17,6 +17,7 @@ import (
 
 	"github.com/zealish/zealish-router/internal/api"
 	"github.com/zealish/zealish-router/internal/auth"
+	"github.com/zealish/zealish-router/internal/cache"
 	"github.com/zealish/zealish-router/internal/config"
 	"github.com/zealish/zealish-router/internal/metrics"
 	"github.com/zealish/zealish-router/internal/router"
@@ -243,6 +244,14 @@ func serve(cfg *config.Config, configPath string, logger *slog.Logger) error {
 	adminAuth := auth.NewAdminService(cfg.Admin.Enabled, cfg.Admin.Token)
 	quota := auth.NewQuota(store.Usage())
 
+	var responses *cache.Cache
+	if cfg.Cache.Enabled {
+		responses = cache.New(cfg.Cache.TTL, cfg.Cache.MaxEntries)
+		logger.Info("response cache enabled",
+			slog.Duration("ttl", cfg.Cache.TTL),
+			slog.Int("max_entries", cfg.Cache.MaxEntries))
+	}
+
 	server := api.NewServer(api.Dependencies{
 		Config:    cfg,
 		Engine:    engine,
@@ -251,6 +260,7 @@ func serve(cfg *config.Config, configPath string, logger *slog.Logger) error {
 		Auth:      authenticator,
 		AdminAuth: adminAuth,
 		Quota:     quota,
+		Cache:     responses,
 		Metrics:   collector,
 		Logger:    logger,
 	})

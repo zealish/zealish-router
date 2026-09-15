@@ -86,6 +86,54 @@ func TestBreakerRejectsNegativeValues(t *testing.T) {
 	}
 }
 
+// The cache is off by default, but its TTL and size are pre-filled so that
+// turning it on takes a single line.
+func TestCacheDefaults(t *testing.T) {
+	path := writeConfigFile(t, "database:\n  path: data/router.db\n")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Cache.Enabled {
+		t.Error("cache is enabled by default")
+	}
+	if cfg.Cache.TTL != 5*time.Minute || cfg.Cache.MaxEntries != 1024 {
+		t.Errorf("cache defaults = %+v, want 5m / 1024", cfg.Cache)
+	}
+}
+
+func TestCacheReadFromYAML(t *testing.T) {
+	path := writeConfigFile(t, `database:
+  path: data/router.db
+cache:
+  enabled: true
+  ttl: 90s
+  max_entries: 256
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Cache.Enabled || cfg.Cache.TTL != 90*time.Second || cfg.Cache.MaxEntries != 256 {
+		t.Errorf("cache = %+v", cfg.Cache)
+	}
+}
+
+// An enabled cache with no bound on staleness or footprint is a
+// misconfiguration, not a silently disabled cache.
+func TestCacheRejectsUnboundedSettings(t *testing.T) {
+	for _, body := range []string{
+		"database:\n  path: data/router.db\ncache:\n  enabled: true\n  ttl: 0s\n",
+		"database:\n  path: data/router.db\ncache:\n  enabled: true\n  max_entries: 0\n",
+	} {
+		if _, err := Load(writeConfigFile(t, body)); err == nil {
+			t.Errorf("Load accepted an unbounded cache:\n%s", body)
+		}
+	}
+}
+
 // The shipped example is the documentation users copy; it must stay loadable.
 func TestExampleConfigLoads(t *testing.T) {
 	cfg, err := Load(filepath.Join("..", "..", "config.example.yaml"))

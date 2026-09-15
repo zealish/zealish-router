@@ -23,6 +23,19 @@ type Config struct {
 	Usage    Usage    `yaml:"usage"`
 	Admin    Admin    `yaml:"admin"`
 	Router   Router   `yaml:"router"`
+	Cache    Cache    `yaml:"cache"`
+}
+
+// Cache configures the exact-match response cache. It is off unless both a
+// TTL and a size are set, because a cache with an unbounded staleness window
+// or an unbounded footprint is worse than no cache at all.
+type Cache struct {
+	Enabled bool `yaml:"enabled"`
+	// TTL bounds how stale a served response may be.
+	TTL time.Duration `yaml:"ttl"`
+	// MaxEntries caps how many responses are held; the least recently used
+	// entry is evicted past it.
+	MaxEntries int `yaml:"max_entries"`
 }
 
 // Router configures the routing engine's resilience policy.
@@ -112,6 +125,8 @@ func Default() *Config {
 			Breaker:     Breaker{FailureThreshold: 5, Cooldown: 30 * time.Second},
 			HealthCheck: HealthCheck{Enabled: true, Interval: 30 * time.Second, Timeout: 5 * time.Second},
 		},
+		// Defaults so turning the cache on only takes `enabled: true`.
+		Cache: Cache{TTL: 5 * time.Minute, MaxEntries: 1024},
 	}
 }
 
@@ -158,6 +173,14 @@ func (c *Config) Validate() error {
 	if c.Router.HealthCheck.Timeout < 0 {
 		return fmt.Errorf("config: invalid router.health_check.timeout %s",
 			c.Router.HealthCheck.Timeout)
+	}
+	if c.Cache.Enabled && c.Cache.TTL <= 0 {
+		return fmt.Errorf("config: cache.ttl must be positive when cache.enabled is true, got %s",
+			c.Cache.TTL)
+	}
+	if c.Cache.Enabled && c.Cache.MaxEntries <= 0 {
+		return fmt.Errorf("config: cache.max_entries must be positive when cache.enabled is true, got %d",
+			c.Cache.MaxEntries)
 	}
 	if c.Database.Path == "" {
 		return errors.New("config: database.path is required")

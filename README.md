@@ -27,6 +27,7 @@ License: Apache-2.0 · Platform: Linux, Docker
 - Durable usage log: every request — successful or failed — is recorded with
   tokens, cost and status for lifetime statistics
 - Built-in pricing table for cost attribution per request
+- Exact-match response cache so a replayed prompt costs nothing
 - Outbound proxy pool for reaching upstreams through rotating proxies
 - API key authentication (`zr_…` keys, only hashes stored)
 - SQLite persistence, pure Go — no cgo, `CGO_ENABLED=0` friendly
@@ -167,6 +168,11 @@ auth:
 usage:
   retention_days: 90       # delete usage events older than this; 0 keeps all
 
+cache:
+  enabled: false           # exact-match response cache, off by default
+  ttl: 5m                  # how stale a served response may be
+  max_entries: 1024        # LRU bound on how many responses are held
+
 admin:
   enabled: false           # false unmounts /api/v1 entirely
   token: ""                # generate your own; validation rejects an empty
@@ -183,6 +189,9 @@ admin:
 | `auth.enabled` | `false` disables gateway authentication entirely. |
 | `auth.api_keys` | Static keys compared in constant time; useful for local dev. |
 | `usage.retention_days` | Usage events older than this are deleted hourly. `0` keeps every event, growing the database without bound. |
+| `cache.enabled` | Turns the exact-match response cache on. Streaming is never cached. |
+| `cache.ttl` | How long a cached response may be served. Must be positive when the cache is on. |
+| `cache.max_entries` | LRU capacity. Must be positive when the cache is on. |
 | `admin.enabled` | Ships `false`, so a default deployment exposes no configuration surface. |
 | `admin.token` | Bearer token for `/api/v1`. Required once `admin.enabled` is true. |
 | `admin.cors_origins` | Exact origins echoed back; wildcards are never sent. |
@@ -240,6 +249,7 @@ version                      print the build version
 | `POST` | `/api/v1/models/{alias}/test` | Fire a minimal completion through an alias |
 | `GET` `PUT` `DELETE` | `/api/v1/combos[/{name}]` | Combos: virtual models backed by a pool of aliases |
 | `GET` `PUT` `POST` `DELETE` | `/api/v1/proxies[/{name}]`, `…/import` | Outbound proxy pool |
+| `GET` `DELETE` | `/api/v1/cache` | Response cache stats; `DELETE` purges every entry |
 | `GET` `PUT` | `/api/v1/settings` | Key/value settings |
 
 Every mutation republishes the routing table in place — no restart needed.
@@ -377,6 +387,7 @@ reason.
 | `router_provider_errors_total` | `provider`, `reason` |
 | `router_stream_connections` | — |
 | `router_tokens_total` | `provider`, `model`, `kind` |
+| `router_cache_events_total` | `endpoint`, `model`, `event` |
 
 Token counts come from upstream `usage` when reported and are estimated
 (~4 characters per token) otherwise, including for streams.
@@ -421,6 +432,27 @@ the key address every alias and combo. Otherwise only the listed names are
 reachable: anything else returns `403`, and `GET /v1/models` lists only what
 the key may actually call. Names are matched exactly against the aliases and
 combos the engine serves, and rejected at configuration time if unknown.
+
+### Response cache
+
+With `cache.enabled: true` the gateway serves a repeated request from memory
+instead of paying an upstream for it. A lookup hits only on an exact match:
+same endpoint, same model and a byte-identical request body. That makes the
+cache useful for agents that replay a prompt — a retried tool loop, a rerun
+evaluation, a dashboard polling the same completion — and inert for genuinely
+new traffic.
+
+Streaming requests are never cached: they are relayed chunk by chunk and never
+buffered. Failed requests are not cached either, so an upstream error is never
+replayed. Every response carries `X-Cache: HIT`, `MISS` or `BYPASS`.
+
+Entries are shared across API keys, because the key is the request body and an
+identical body yields an identical response whoever sent it. A cached response
+costs nothing and is not written to the usage log, so cached traffic does not
+consume a key's budget. The cache is in-process and lost on restart; `ttl`
+bounds staleness and `max_entries` bounds memory, evicting least recently used
+first. `GET /api/v1/cache` reports occupancy and hit rate, `DELETE
+/api/v1/cache` purges it.
 
 ---
 

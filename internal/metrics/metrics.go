@@ -22,6 +22,7 @@ type Metrics struct {
 	StreamConnections   prometheus.Gauge
 	TokensTotal         *prometheus.CounterVec
 	CircuitState        *prometheus.GaugeVec
+	CacheEventsTotal    *prometheus.CounterVec
 }
 
 // New creates collectors and registers them on a fresh registry.
@@ -59,6 +60,10 @@ func New() *Metrics {
 			Name: "router_circuit_state",
 			Help: "Provider circuit breaker state: 0 closed, 1 half-open, 2 open.",
 		}, []string{"provider"}),
+		CacheEventsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "router_cache_events_total",
+			Help: "Response cache lookups by outcome: hit, miss or store.",
+		}, []string{"endpoint", "model", "event"}),
 	}
 
 	reg.MustRegister(
@@ -68,6 +73,7 @@ func New() *Metrics {
 		m.StreamConnections,
 		m.TokensTotal,
 		m.CircuitState,
+		m.CacheEventsTotal,
 	)
 	return m
 }
@@ -75,6 +81,19 @@ func New() *Metrics {
 // RecordProviderError counts one upstream failure for a provider.
 func (m *Metrics) RecordProviderError(provider, reason string) {
 	m.ProviderErrorsTotal.WithLabelValues(provider, reason).Inc()
+}
+
+// Response cache outcomes, used as the "event" label of
+// router_cache_events_total.
+const (
+	CacheHit   = "hit"
+	CacheMiss  = "miss"
+	CacheStore = "store"
+)
+
+// RecordCacheEvent counts one response cache outcome.
+func (m *Metrics) RecordCacheEvent(endpoint, model, event string) {
+	m.CacheEventsTotal.WithLabelValues(endpoint, model, event).Inc()
 }
 
 // Circuit breaker gauge values, ordered by severity so alerting can threshold

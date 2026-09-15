@@ -50,6 +50,18 @@ router:
     # Deadline for a single ping.
     timeout: 5s
 
+# Exact-match response cache. A repeated non-streaming request — same endpoint,
+# same model, byte-identical body — is served from memory without touching an
+# upstream, which is what makes an agent replaying the same prompt free. The
+# cache is in-process and lost on restart. Streaming is never cached.
+cache:
+  enabled: false
+  # How long a cached response may be served. This is the staleness window.
+  ttl: 5m
+  # Maximum number of cached responses; the least recently used one is evicted
+  # past it. Large responses make this the memory knob that matters.
+  max_entries: 1024
+
 # The admin API is the dashboard's backend and can reconfigure routing, so it
 # ships disabled. Enable it with a token you generate yourself — anything
 # predictable here is a remote configuration hole.

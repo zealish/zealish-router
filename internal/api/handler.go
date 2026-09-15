@@ -9,6 +9,7 @@ import (
 	"sort"
 
 	"github.com/zealish/zealish-router/internal/auth"
+	"github.com/zealish/zealish-router/internal/cache"
 	"github.com/zealish/zealish-router/internal/metrics"
 	"github.com/zealish/zealish-router/internal/provider"
 	"github.com/zealish/zealish-router/internal/router"
@@ -19,11 +20,12 @@ import (
 type handler struct {
 	engine  *router.Engine
 	metrics *metrics.Metrics
+	cache   *cache.Cache
 	logger  *slog.Logger
 }
 
 func newHandler(deps Dependencies) *handler {
-	return &handler{engine: deps.Engine, metrics: deps.Metrics, logger: deps.Logger}
+	return &handler{engine: deps.Engine, metrics: deps.Metrics, cache: deps.Cache, logger: deps.Logger}
 }
 
 func (h *handler) health(w http.ResponseWriter, _ *http.Request) {
@@ -67,8 +69,13 @@ func allowModel(w http.ResponseWriter, r *http.Request, model string) bool {
 }
 
 func (h *handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
+	raw, ok := h.readBody(w, r)
+	if !ok {
+		return
+	}
+
 	var req openai.ChatCompletionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.Unmarshal(raw, &req); err != nil {
 		writeDecodeError(w, err, "Malformed JSON body.")
 		return
 	}
@@ -81,7 +88,15 @@ func (h *handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Stream {
+		// A stream is relayed chunk by chunk and never buffered, so it is
+		// neither served from nor admitted to the cache.
+		w.Header().Set(cacheHeader, headerPass)
 		h.streamCompletion(w, r, &req)
+		return
+	}
+
+	key, served := h.lookupCache(w, endpointChat, req.Model, raw)
+	if served {
 		return
 	}
 
@@ -90,12 +105,25 @@ func (h *handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		h.writeEngineError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, resp)
+
+	body, err := json.Marshal(resp)
+	if err != nil {
+		h.logger.Error("encode completion", slog.Any("error", err))
+		writeError(w, http.StatusInternalServerError, "api_error", "Failed to encode the upstream response.")
+		return
+	}
+	h.storeCache(endpointChat, req.Model, key, body)
+	writeBody(w, body)
 }
 
 func (h *handler) embeddings(w http.ResponseWriter, r *http.Request) {
+	raw, ok := h.readBody(w, r)
+	if !ok {
+		return
+	}
+
 	var req openai.EmbeddingRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.Unmarshal(raw, &req); err != nil {
 		writeDecodeError(w, err, "Malformed JSON body.")
 		return
 	}
@@ -111,12 +139,25 @@ func (h *handler) embeddings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	key, served := h.lookupCache(w, endpointEmbeddings, req.Model, raw)
+	if served {
+		return
+	}
+
 	resp, err := h.engine.Embeddings(r.Context(), &req)
 	if err != nil {
 		h.writeEngineError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, resp)
+
+	body, err := json.Marshal(resp)
+	if err != nil {
+		h.logger.Error("encode embeddings", slog.Any("error", err))
+		writeError(w, http.StatusInternalServerError, "api_error", "Failed to encode the upstream response.")
+		return
+	}
+	h.storeCache(endpointEmbeddings, req.Model, key, body)
+	writeBody(w, body)
 }
 
 func (h *handler) streamCompletion(w http.ResponseWriter, r *http.Request, req *openai.ChatCompletionRequest) {
