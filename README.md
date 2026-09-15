@@ -30,6 +30,10 @@ License: Apache-2.0 · Platform: Linux, Docker
   tokens, cost and status for lifetime statistics
 - Built-in pricing table for cost attribution per request
 - Exact-match response cache so a replayed prompt costs nothing
+- Request extensions: RTK semantically compresses verbose tool output (logs,
+  diffs, stack traces) and Request Sanitization does mechanical cleanup
+  (whitespace, history windowing, dedup) — both toggleable from the dashboard,
+  with lifetime bytes/tokens saved reported alongside the enabled flag
 - Outbound proxy pool for reaching upstreams through rotating proxies
 - API key authentication (`zr_…` keys, only hashes stored)
 - SQLite persistence, pure Go — no cgo, `CGO_ENABLED=0` friendly

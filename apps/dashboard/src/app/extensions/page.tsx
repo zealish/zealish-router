@@ -89,6 +89,13 @@ export default function ExtensionsPage() {
                 <p className="text-muted-foreground mt-2 text-sm">
                   {ext.description}
                 </p>
+                {ext.stats.bytes_saved > 0 ? (
+                  <p className="text-muted-foreground mt-2 text-xs">
+                    {ext.stats.messages_rewritten.toLocaleString()} message(s)
+                    rewritten · ~{ext.stats.tokens_saved.toLocaleString()}{" "}
+                    tokens saved
+                  </p>
+                ) : null}
               </div>
               <Switch
                 checked={ext.enabled}

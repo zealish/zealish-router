@@ -10,12 +10,18 @@ import (
 	"fmt"
 	"strconv"
 	"sync"
+	"sync/atomic"
 
 	"github.com/zealish/zealish-router/internal/extension/rtk"
 	"github.com/zealish/zealish-router/internal/extension/sanitize"
 	"github.com/zealish/zealish-router/internal/storage"
 	"github.com/zealish/zealish-router/pkg/openai"
 )
+
+// charsPerToken is the ratio used to express shrinkage in tokens rather than
+// bytes. It matches the router's usage estimator: an approximation, reported
+// so an operator can see what an extension is worth, never billed on.
+const charsPerToken = 4
 
 // Extension ids. They are wire-visible (admin API, settings keys), so they
 // never change once shipped.
@@ -34,6 +40,30 @@ type Info struct {
 	Description string          `json:"description"`
 	Enabled     bool            `json:"enabled"`
 	Config      json.RawMessage `json:"config"`
+	Stats       Stats           `json:"stats"`
+}
+
+// Stats is a lifetime read of one extension's effect on request bodies.
+type Stats struct {
+	// MessagesRewritten counts messages an extension actually changed;
+	// running over an untouched request costs nothing here.
+	MessagesRewritten int64 `json:"messages_rewritten"`
+	// BytesSaved is the total content shrinkage across every rewrite.
+	BytesSaved int64 `json:"bytes_saved"`
+	// TokensSaved is BytesSaved expressed at the same approximate ratio the
+	// router uses to estimate usage: informative, never billed on.
+	TokensSaved int64 `json:"tokens_saved"`
+}
+
+func statsOf(messages, bytes int64) Stats {
+	if bytes <= 0 {
+		return Stats{}
+	}
+	return Stats{
+		MessagesRewritten: messages,
+		BytesSaved:        bytes,
+		TokensSaved:       (bytes + charsPerToken - 1) / charsPerToken,
+	}
 }
 
 // RTKConfig has no knobs yet; the kernel's invariants are not configuration.
@@ -57,12 +87,17 @@ type state struct {
 }
 
 // Registry owns extension state: persisted in storage, cached in memory so
-// the hot request path never touches the database.
+// the hot request path never touches the database. Effect counters are
+// atomic rather than behind mu: they are updated on every Apply call, far
+// hotter than the config swap.
 type Registry struct {
 	settings storage.SettingStore
 
 	mu sync.RWMutex
 	st state
+
+	rtkMessages, rtkBytes int64
+	sanMessages, sanBytes int64
 }
 
 // NewRegistry builds a registry reading and writing through settings.
@@ -108,6 +143,7 @@ func (r *Registry) List() []Info {
 			Description: "Semantic token reduction before routing: terminal logs, git diffs, tree/ls listings, stack traces and repetitive PASS/OK output are replaced with structured summaries. System prompts, user intent, tool schemas, JSON payloads and function calls are never modified.",
 			Enabled:     st.rtkEnabled,
 			Config:      rtkCfg,
+			Stats:       statsOf(atomic.LoadInt64(&r.rtkMessages), atomic.LoadInt64(&r.rtkBytes)),
 		},
 		{
 			ID:          IDSanitize,
@@ -115,6 +151,7 @@ func (r *Registry) List() []Info {
 			Description: "Mechanical cleanup: whitespace trimming, history windowing and dropping consecutive duplicate messages. System prompts are never touched.",
 			Enabled:     st.sanitizeEnabled,
 			Config:      sanCfg,
+			Stats:       statsOf(atomic.LoadInt64(&r.sanMessages), atomic.LoadInt64(&r.sanBytes)),
 		},
 	}
 }
@@ -152,6 +189,8 @@ func (r *Registry) Update(ctx context.Context, id string, enabled bool, config j
 // Apply runs every enabled extension over the request messages, in a fixed
 // order: sanitization first (cheap, mechanical), then RTK (semantic). The
 // request is mutated in place; disabled extensions cost one atomic read.
+// Effect counters are updated so the dashboard can show what each extension
+// is worth, not just whether it is on.
 func (r *Registry) Apply(req *openai.ChatCompletionRequest) {
 	r.mu.RLock()
 	st := r.st
@@ -163,18 +202,65 @@ func (r *Registry) Apply(req *openai.ChatCompletionRequest) {
 
 	msgs := req.Messages
 	if st.sanitizeEnabled {
+		before := messageBytes(msgs)
+		var changed int64
 		if st.sanitizeCfg.DedupMessages {
-			msgs, _ = sanitize.DedupMessages(msgs)
+			next, removed := sanitize.DedupMessages(msgs)
+			changed += int64(removed)
+			msgs = next
 		}
 		if st.sanitizeCfg.HistoryWindow > 0 {
-			msgs, _ = sanitize.WindowHistory(msgs, st.sanitizeCfg.HistoryWindow)
+			next, dropped := sanitize.WindowHistory(msgs, st.sanitizeCfg.HistoryWindow)
+			changed += int64(dropped)
+			msgs = next
 		}
 		if st.sanitizeCfg.TrimWhitespace {
-			msgs, _ = sanitize.TrimWhitespace(msgs)
+			next, trimmedBytes := sanitize.TrimWhitespace(msgs)
+			if trimmedBytes > 0 {
+				changed += messagesDiffer(msgs, next)
+			}
+			msgs = next
+		}
+		if delta := before - messageBytes(msgs); delta > 0 {
+			atomic.AddInt64(&r.sanBytes, delta)
+		}
+		if changed > 0 {
+			atomic.AddInt64(&r.sanMessages, changed)
 		}
 	}
 	if st.rtkEnabled {
-		msgs = rtk.Compress(msgs).Messages
+		result := rtk.Compress(msgs)
+		msgs = result.Messages
+		if result.SavedBytes > 0 {
+			atomic.AddInt64(&r.rtkBytes, int64(result.SavedBytes))
+		}
+		if result.CompressedMessages > 0 {
+			atomic.AddInt64(&r.rtkMessages, int64(result.CompressedMessages))
+		}
 	}
 	req.Messages = msgs
+}
+
+// messageBytes sums the raw content length across a message list. It is a
+// rough proxy for token count, consistent enough to diff before and after a
+// rewrite.
+func messageBytes(messages []openai.Message) int64 {
+	var total int64
+	for _, m := range messages {
+		total += int64(len(m.Content))
+	}
+	return total
+}
+
+// messagesDiffer counts how many messages changed content between two
+// same-length lists, as produced by TrimWhitespace which rewrites in place
+// without adding or removing messages.
+func messagesDiffer(before, after []openai.Message) int64 {
+	var n int64
+	for i := range before {
+		if i < len(after) && string(before[i].Content) != string(after[i].Content) {
+			n++
+		}
+	}
+	return n
 }

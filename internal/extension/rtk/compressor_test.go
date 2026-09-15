@@ -78,7 +78,7 @@ func TestCompressSummarizesDiff(t *testing.T) {
 
 func TestCompressSummarizesTerminalLog(t *testing.T) {
 	log := repeatLines("2026-09-15T10:00:00 INFO server listening on :8787", 40)
-	res := Compress([]openai.Message{textMessage("user", "logs:\n" + log)})
+	res := Compress([]openai.Message{textMessage("user", "logs:\n"+log)})
 	out := mustText(t, res.Messages[0])
 	if !strings.Contains(out, "[rtk:terminal-log") {
 		t.Fatalf("missing log summary: %q", out)
@@ -97,7 +97,7 @@ func TestCompressKeepsErrorLogLines(t *testing.T) {
 	for range 20 {
 		lines = append(lines, "2026-09-15T10:00:02 INFO ok")
 	}
-	res := Compress([]openai.Message{textMessage("user", strings.Join(lines, "\n") + "\npadding so the message passes the length gate")})
+	res := Compress([]openai.Message{textMessage("user", strings.Join(lines, "\n")+"\npadding so the message passes the length gate")})
 	out := mustText(t, res.Messages[0])
 	if !strings.Contains(out, "ERROR database connection refused") {
 		t.Fatalf("error line was elided: %q", out)

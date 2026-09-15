@@ -547,6 +547,37 @@ trace looked identical whichever one produced it.
 - [x] `next build`, `tsc` and `eslint` clean; verified in a browser against a
       running router
 
+## v1.9 — Extension Effect Tracking ✅
+
+v1.8's Anthropic ingress work landed alongside RTK and Request Sanitization
+(the two toggleable request extensions), but that commit shipped without
+tests and without a way to see what either extension actually saves. This
+closes both gaps.
+
+### Effect tracking
+- [x] `extension.Stats` — lifetime messages rewritten, bytes saved, and bytes
+      expressed as tokens at the same ratio the router's usage estimator uses
+- [x] `Registry.Apply` diffs message-list byte totals before/after sanitize
+      and reads RTK's own `Result.SavedBytes`/`CompressedMessages`, both
+      behind atomic counters so the hot path never blocks on the config lock
+- [x] `GET /api/v1/extensions` and the dashboard Extensions page report each
+      extension's stats alongside its enabled flag
+
+### Tests
+- [x] `internal/extension`: defaults-disabled, no-op when nothing enabled,
+      update persists and reloads, unknown id and negative `history_window`
+      rejected, sanitize and RTK stats populate after a rewrite, system
+      prompts stay untouched with both enabled
+- [x] `internal/extension/sanitize`: whitespace trim, system/developer
+      exemption, no-op returns the input unchanged, history window keeps the
+      tail and never opens on an orphaned tool result, dedup drops
+      consecutive duplicates but never a system prompt or a tool call
+- [x] `internal/api`: `/api/v1/extensions` list and update lifecycle,
+      unknown id 404, invalid config 400, disabled admin API 404, a chat
+      request is rewritten when an extension is enabled and passed through
+      untouched when it is not
+- [x] `next build`, `tsc` and `eslint` clean
+
 ---
 
 ## Open Decisions
@@ -564,5 +595,7 @@ trace looked identical whichever one produced it.
 
 ## Next Action
 
-**v1.8 is feature-complete.** Both edges speak either dialect, and the
-dashboard reports which one each client used. No further work is queued.
+**v1.9 is feature-complete.** Both edges speak either dialect, and the
+dashboard reports which one each client used. RTK and Request Sanitization
+are tested end to end, and their effect on request bodies is visible in the
+dashboard rather than assumed. No further work is queued.
