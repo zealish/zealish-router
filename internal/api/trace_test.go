@@ -55,12 +55,15 @@ func TestGatewayRecordsClientDialect(t *testing.T) {
 	if rec := post(t, h, `{"model":"gpt-5","messages":[{"role":"user","content":"hi"}]}`); rec.Code != http.StatusOK {
 		t.Fatalf("chat status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
 	}
+	if rec := postResponses(t, h, `{"model":"gpt-5","input":"hi"}`); rec.Code != http.StatusOK {
+		t.Fatalf("responses status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
 
 	traces, _, err := store.Traces().List(context.Background(), storage.TraceFilter{})
 	if err != nil {
 		t.Fatalf("list traces: %v", err)
 	}
-	if len(traces) != 2 {
+	if len(traces) != 3 {
 		t.Fatalf("traces = %d, want one per request", len(traces))
 	}
 
@@ -68,7 +71,7 @@ func TestGatewayRecordsClientDialect(t *testing.T) {
 	for _, tr := range traces {
 		got[tr.Dialect]++
 	}
-	if got[storage.DialectAnthropic] != 1 || got[storage.DialectOpenAI] != 1 {
+	if got[storage.DialectAnthropic] != 1 || got[storage.DialectOpenAI] != 1 || got[storage.DialectResponses] != 1 {
 		t.Fatalf("dialects = %v, want one of each", got)
 	}
 

@@ -580,6 +580,85 @@ closes both gaps.
 
 ---
 
+## v2.0 — OpenAI Responses API ✅
+
+Codex CLI and the current OpenAI SDKs default to `POST /v1/responses`, not
+Chat Completions, so the PRD's primary target users could not reach the
+gateway at all. Same pattern as v1.7: translate at the edge, reuse the whole
+pipeline — routing, fallback, retry, quotas, allowlist, cache, usage, traces.
+
+### Wire types (`pkg/openai/responses.go`)
+- [x] `ResponseRequest` — `input` stays raw (string or item array), read via
+      `InputItems`; `previous_response_id` modelled only to be rejected
+- [x] `ResponseItem` — the flattened item union: message, `function_call`
+      (with the JSON-string `arguments`), `function_call_output`
+- [x] `Response` envelope with `output`, `status`, `incomplete_details` (null
+      when complete, which SDKs check) and the `ResponseUsage` spelling of
+      token accounting (`input_tokens`/`output_tokens`, cache details)
+- [x] `annotations` serialised as an empty array, never omitted — SDKs
+      iterate it without a nil check
+
+### Request translation (`internal/api/responses.go`)
+- [x] `instructions` → leading system message; a bare-string `input` → one
+      user message, item arrays item by item
+- [x] `function_call` → assistant `tool_calls`; `function_call_output` →
+      `role: "tool"` + `tool_call_id`; typeless `{role, content}` accepted as
+      the EasyInputMessage shorthand every SDK emits
+- [x] `input_text`/`output_text`/`input_image` parts → chat parts; a
+      text-only turn keeps the compact string form
+- [x] Flattened `tools[]` → the nested `function` form; hosted tools
+      (`web_search`, …) dropped rather than forwarded into a rejection;
+      `tool_choice` across the string and object forms
+- [x] `previous_response_id` → 400: the gateway stores no responses, and
+      accepting it would silently drop the history it stands for
+
+### Response translation
+- [x] Assistant text → one `message` item with an `output_text` part;
+      `tool_calls` → one `function_call` item each
+- [x] `finish_reason: "length"` → `status: "incomplete"` +
+      `incomplete_details.reason: "max_output_tokens"`
+- [x] Usage mapped onto the Responses spelling, cache and reasoning details
+      included; upstream ids rewritten into the `resp_` namespace
+
+### Streaming (`internal/api/responses_stream.go`)
+- [x] Chunks reframed into the named, sequence-numbered event sequence:
+      `response.created` → `response.in_progress` →
+      (`response.output_item.added` → deltas → `…done` →
+      `response.output_item.done`)* → `response.completed`, no `[DONE]`
+- [x] Text streams as `response.output_text.delta`, tool arguments as
+      `response.function_call_arguments.delta`, indexed per output item;
+      text and calls never share an item
+- [x] `response.completed` carries the aggregated output and usage;
+      truncation emits `response.incomplete` instead
+- [x] An upstream that closes without a chunk still produces a well-formed
+      lifecycle rather than an empty body
+
+### Transport & observability
+- [x] `POST /v1/responses` behind the same body limit, auth, quota,
+      allowlist and trace middleware as `/v1/chat/completions`; errors use
+      the OpenAI envelope this dialect shares
+- [x] Cached under its own `responses` endpoint label — same reasoning as
+      `/v1/messages`: a different dialect makes an identical prompt a
+      different request
+- [x] `storage.DialectResponses` recorded on every trace; no migration
+      needed, the `dialect` column is free-form TEXT
+- [x] Dashboard `REQUEST_DIALECTS` grew `"responses"`, so the filter and
+      badge cover the third population
+
+### Tests
+- [x] Handler: string and item-array input, tool cycle round-trip, usage
+      mapping, required fields, `previous_response_id` rejected, unknown
+      alias 404, upstream 5xx a 502 with no detail leak, `length` →
+      incomplete
+- [x] Streaming: event sequence and ordering, strictly increasing
+      `sequence_number`, no `[DONE]`, text deltas reassemble, tool argument
+      fragments reassemble, text and calls occupy separate indexed items,
+      usage on `response.completed`, silent upstream still well-formed,
+      pre-frame failure is a status code, cache bypassed
+- [x] Trace: one request per dialect produces three traces, one per dialect
+
+---
+
 ## Open Decisions
 
 | # | Decision | Options | Status |
@@ -590,12 +669,13 @@ closes both gaps.
 | 4 | Rate limiting scope | v1.0 vs post-1.0 | **resolved: shipped in v1.1**, in-process, keyed on `api_keys` |
 | 5 | `Message.Content` representation | `json.RawMessage` vs typed union | **resolved: `json.RawMessage` + `Text()`** (v0.2) |
 | 6 | Anthropic ingress representation | reuse the OpenAI core vs a parallel pipeline | **resolved: reuse** (v1.7) — `/v1/messages` translates at the edge, so routing, quotas and usage stay single-sourced |
+| 7 | Responses API state (`previous_response_id`, `store`) | persist responses vs reject | **resolved: reject** (v2.0) — the gateway is stateless by design; a client chains turns by resending the conversation in `input` |
 
 ---
 
 ## Next Action
 
-**v1.9 is feature-complete.** Both edges speak either dialect, and the
-dashboard reports which one each client used. RTK and Request Sanitization
-are tested end to end, and their effect on request bodies is visible in the
-dashboard rather than assumed. No further work is queued.
+**v2.0 is feature-complete.** The gateway now accepts all three client
+dialects — Chat Completions, Responses and Anthropic Messages — on one
+routing, quota and accounting core, so Codex CLI, the current OpenAI SDKs
+and Claude Code all work against the same aliases. No further work is queued.

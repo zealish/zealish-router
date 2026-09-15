@@ -26,6 +26,8 @@ const (
 	// The Messages endpoint keys separately from chat: the bodies are a
 	// different dialect, so an identical prompt is not an identical request.
 	endpointMessages = "messages"
+	// The Responses endpoint keys separately for the same reason.
+	endpointResponses = "responses"
 )
 
 // readBody buffers the raw request body. The cache keys on the exact bytes a

@@ -255,11 +255,14 @@ type UsageStore interface {
 	Prune(ctx context.Context, before time.Time) (int64, error)
 }
 
-// The wire dialects a client can speak. The gateway translates both onto one
+// The wire dialects a client can speak. The gateway translates each onto one
 // internal shape, so the dialect is recorded rather than inferred from a path.
 const (
 	DialectOpenAI    = "openai"
 	DialectAnthropic = "anthropic"
+	// DialectResponses is the OpenAI Responses API — same vendor as
+	// DialectOpenAI, but a different wire shape and client population.
+	DialectResponses = "responses"
 )
 
 // RequestTrace is the summary of one gateway request: a single row however

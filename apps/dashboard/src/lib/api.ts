@@ -184,10 +184,11 @@ export type RequestStatus = (typeof REQUEST_STATUSES)[number];
 
 /**
  * The wire dialect a client spoke. OpenAI covers /v1/chat/completions and
- * /v1/embeddings; Anthropic covers /v1/messages. Both reach the same aliases,
- * so the dialect describes the caller, not the route.
+ * /v1/embeddings; Responses covers /v1/responses; Anthropic covers
+ * /v1/messages. All reach the same aliases, so the dialect describes the
+ * caller, not the route.
  */
-export const REQUEST_DIALECTS = ["openai", "anthropic"] as const;
+export const REQUEST_DIALECTS = ["openai", "responses", "anthropic"] as const;
 
 export type RequestDialect = (typeof REQUEST_DIALECTS)[number];
 

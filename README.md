@@ -14,11 +14,14 @@ License: Apache-2.0 · Platform: Linux, Docker
 
 ## Features
 
-- OpenAI-compatible `POST /v1/chat/completions`, `POST /v1/embeddings` and `GET /v1/models`
+- OpenAI-compatible `POST /v1/chat/completions`, `POST /v1/responses`,
+  `POST /v1/embeddings` and `GET /v1/models` — Codex CLI and the current
+  OpenAI SDKs (which default to the Responses API) both work out of the box
 - Anthropic-compatible `POST /v1/messages`, so Claude Code and the Anthropic
   SDKs reach the same aliases, fallback chain and budget as an OpenAI client
-- Two wire dialects — OpenAI and Anthropic — plus a preset catalogue for known
-  upstreams (OpenAI, OpenRouter, Groq, Ollama, …); any compatible endpoint works
+- Three wire dialects — Chat Completions, Responses and Anthropic — plus a
+  preset catalogue for known upstreams (OpenAI, OpenRouter, Groq, Ollama, …);
+  any compatible endpoint works
 - Tool calling and image input translated across both dialects, streaming
   included, so an agent keeps working when it falls back to another provider
 - Model aliases with a deterministic fallback chain
@@ -243,6 +246,7 @@ version                      print the build version
 | Method | Path | Description |
 |---|---|---|
 | `POST` | `/v1/chat/completions` | OpenAI chat completions, streaming and non-streaming |
+| `POST` | `/v1/responses` | OpenAI Responses API, streaming and non-streaming |
 | `POST` | `/v1/embeddings` | OpenAI embeddings; same aliases, fallback and cost accounting |
 | `POST` | `/v1/messages` | Anthropic messages, streaming and non-streaming |
 | `GET` | `/v1/models` | Configured aliases and combos |

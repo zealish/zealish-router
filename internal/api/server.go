@@ -86,6 +86,9 @@ func newRoutes(deps Dependencies, h *handler) http.Handler {
 		// The Anthropic dialect, for clients that speak Messages rather than
 		// Chat Completions. Same auth, quota, allowlist and routing.
 		v1.Post("/messages", h.messages)
+		// The OpenAI Responses dialect, which Codex CLI and the current
+		// OpenAI SDKs default to. Same auth, quota, allowlist and routing.
+		v1.Post("/responses", h.responses)
 	})
 
 	if deps.Config.Admin.Enabled {
