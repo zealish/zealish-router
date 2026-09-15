@@ -60,6 +60,7 @@ func (h *adminHandler) routes(r chi.Router) {
 	r.Post("/keys", h.createKey)
 	r.Delete("/keys/{id}", h.deleteKey)
 	r.Put("/keys/{id}/quota", h.putKeyQuota)
+	r.Put("/keys/{id}/models", h.putKeyModels)
 
 	r.Get("/provider-catalog", h.providerCatalogPresets)
 	r.Get("/providers", h.listProviders)
@@ -183,6 +184,9 @@ type apiKeyResponse struct {
 	RateLimitPerMin  int     `json:"rate_limit_per_min"`
 	MonthlyBudgetUSD float64 `json:"monthly_budget_usd"`
 
+	// AllowedModels lists the models this key may address. Empty means all.
+	AllowedModels []string `json:"allowed_models"`
+
 	// Spend so far in the current calendar month, against the budget above.
 	MonthSpendUSD float64 `json:"month_spend_usd"`
 
@@ -194,15 +198,21 @@ type apiKeyResponse struct {
 }
 
 type createKeyRequest struct {
-	Name             string  `json:"name"`
-	RateLimitPerMin  int     `json:"rate_limit_per_min"`
-	MonthlyBudgetUSD float64 `json:"monthly_budget_usd"`
+	Name             string   `json:"name"`
+	RateLimitPerMin  int      `json:"rate_limit_per_min"`
+	MonthlyBudgetUSD float64  `json:"monthly_budget_usd"`
+	AllowedModels    []string `json:"allowed_models"`
 }
 
 // quotaRequest updates the limits of an existing key.
 type quotaRequest struct {
 	RateLimitPerMin  int     `json:"rate_limit_per_min"`
 	MonthlyBudgetUSD float64 `json:"monthly_budget_usd"`
+}
+
+// allowlistRequest replaces the model allowlist of an existing key.
+type allowlistRequest struct {
+	AllowedModels []string `json:"allowed_models"`
 }
 
 type createKeyResponse struct {
@@ -275,6 +285,11 @@ func (h *adminHandler) createKey(w http.ResponseWriter, r *http.Request) {
 	}
 	generated.Record.RateLimitPerMin = req.RateLimitPerMin
 	generated.Record.MonthlyBudgetUSD = req.MonthlyBudgetUSD
+	allowed, ok := h.checkModels(w, req.AllowedModels)
+	if !ok {
+		return
+	}
+	generated.Record.AllowedModels = allowed
 	if err := h.store.APIKeys().Create(r.Context(), generated.Record); err != nil {
 		h.fail(w, err)
 		return
@@ -317,6 +332,55 @@ func (h *adminHandler) putKeyQuota(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (h *adminHandler) putKeyModels(w http.ResponseWriter, r *http.Request) {
+	var req allowlistRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	allowed, ok := h.checkModels(w, req.AllowedModels)
+	if !ok {
+		return
+	}
+	if err := h.store.APIKeys().SetAllowedModels(r.Context(), urlParam(r, "id"), allowed); err != nil {
+		h.fail(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// checkModels normalises an allowlist and rejects names the engine does not
+// serve, so a typo fails at configuration time instead of silently locking the
+// key out of everything.
+func (h *adminHandler) checkModels(w http.ResponseWriter, models []string) ([]string, bool) {
+	if len(models) == 0 {
+		return nil, true
+	}
+	known := make(map[string]struct{})
+	for _, name := range append(h.engine.Aliases(), h.engine.Combos()...) {
+		known[name] = struct{}{}
+	}
+
+	out := make([]string, 0, len(models))
+	seen := make(map[string]struct{}, len(models))
+	for _, name := range models {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if _, ok := known[name]; !ok {
+			writeError(w, http.StatusBadRequest, "invalid_request_error",
+				"Unknown model '"+name+"'.")
+			return nil, false
+		}
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	return out, true
+}
+
 func toAPIKeyResponse(k storage.APIKey) apiKeyResponse {
 	resp := apiKeyResponse{
 		ID:               k.ID,
@@ -325,6 +389,7 @@ func toAPIKeyResponse(k storage.APIKey) apiKeyResponse {
 		CreatedAt:        k.CreatedAt,
 		RateLimitPerMin:  k.RateLimitPerMin,
 		MonthlyBudgetUSD: k.MonthlyBudgetUSD,
+		AllowedModels:    k.AllowedModels,
 	}
 	if !k.LastUsedAt.IsZero() {
 		used := k.LastUsedAt

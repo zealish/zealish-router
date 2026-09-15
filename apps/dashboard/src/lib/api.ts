@@ -113,10 +113,7 @@ export type ComboInput = {
 };
 
 export type ComboStrategy =
-  | "fallback"
-  | "round_robin"
-  | "weighted"
-  | "intelligent";
+  "fallback" | "round_robin" | "weighted" | "intelligent";
 
 /** Strategies, mirroring storage.ComboStrategy in internal/storage/storage.go. */
 export const COMBO_STRATEGIES: {
@@ -272,6 +269,8 @@ export type ApiKey = {
   rate_limit_per_min: number;
   /** 0 means unlimited. */
   monthly_budget_usd: number;
+  /** Empty or absent means every model is reachable. */
+  allowed_models: string[] | null;
   month_spend_usd: number;
   requests: number;
   tokens_in: number;

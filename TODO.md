@@ -318,6 +318,55 @@ the work lands in `internal/provider/anthropic_tools.go`.
 
 ---
 
+## v1.4 — Per-Key Model Allowlist ✅
+
+A key could previously address every alias and combo. The allowlist scopes a
+credential to a subset of the model namespace, complementing the quotas from
+v1.1: quotas cap how much a key spends, the allowlist caps what it can reach.
+
+### Storage
+- [x] Migration `0014_key_model_allowlist.sql` — `api_keys.allowed_models`,
+      comma-separated like fallback chains; empty means unrestricted, so keys
+      created before the migration keep their current reach
+- [x] `storage.APIKey.AllowedModels` + `APIKeyStore.SetAllowedModels` on SQLite
+      and memory; `Create` now persists quotas and the allowlist, which the
+      previous insert silently dropped
+
+### Request path
+- [x] `auth.Identity.AllowedModels` carried off the key record, so enforcement
+      costs no second storage read
+- [x] `Identity.Allows` — exact match; aliases and combos share one namespace,
+      so no prefix or pattern logic
+- [x] `allowModel` in the handler, not a middleware: the model name lives in
+      the body, which only the handler has decoded. 403, not 404 — the model
+      exists, this key just cannot reach it
+- [x] Enforced on `/v1/chat/completions` (streaming included, before any SSE
+      frame is committed) and `/v1/embeddings`
+- [x] `GET /v1/models` lists only what the key may call, so discovery matches
+      what dispatch permits
+
+### Admin & dashboard
+- [x] `allowed_models` on create and in every key response
+- [x] `PUT /api/v1/keys/{id}/models` — validates every name against the engine's
+      aliases and combos, so a typo fails at configuration time instead of
+      silently locking the key out; duplicates collapse
+- [x] Dashboard Keys page: Models column and an allowed-models dialog picking
+      from aliases and combos
+
+### Tests
+- [x] Storage: allowlist round-trip, replace, clear, `ErrNotFound`, keys created
+      without one read as unrestricted
+- [x] Auth: `Allows` across exact/miss/empty/case, identity carries the list,
+      static keys stay unrestricted
+- [x] HTTP: allowed model passes, disallowed is a 403 on chat, stream and
+      embeddings, the stream rejection is a status code and not an SSE frame,
+      an empty allowlist reaches everything, `/v1/models` hides the rest
+- [x] Admin: create/update/clear lifecycle, unknown model rejected on both
+      paths, combos accepted, unknown key id is a 404
+- [x] Migration verified idempotent against the existing production database
+
+---
+
 ## Open Decisions
 
 | # | Decision | Options | Status |
@@ -332,17 +381,15 @@ the work lands in `internal/provider/anthropic_tools.go`.
 
 ## Next Action
 
-**v1.3 is feature-complete.** Tool calling and image input now translate in
-both directions between the OpenAI and Anthropic dialects, streaming included,
-so an agent that falls back from one to the other keeps its tools. Suite is
-green under `-race` and the provider package is lint-clean.
+**v1.4 is feature-complete.** A key is now scoped to both a spend ceiling and a
+model namespace. Suite is green under `-race` and the repo is lint-clean.
 
 Candidates for the next cycle, in the order they are recommended:
-- Per-key model allowlist — a key can currently reach every alias. Restricting
-  which models a key may address complements the quotas shipped in v1.1.
 - Response cache — an exact-match cache keyed on model and request body would
   cut spend for agents that replay the same prompt, with streaming bypassed and
   a TTL bounding staleness.
 - Per-provider budgets and alerts — the usage log and pricing table already
   hold everything needed to cap spend per provider or alias and notify on a
   threshold.
+- A real subcommand parser, the last unchecked v0.6 item, now that the CLI has
+  grown past the flag handling it was written for.

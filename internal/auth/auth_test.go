@@ -42,6 +42,58 @@ func TestAuthenticateStaticKey(t *testing.T) {
 	}
 }
 
+func TestIdentityAllows(t *testing.T) {
+	unrestricted := Identity{KeyID: "k1"}
+	if !unrestricted.Allows("anything") {
+		t.Error("an empty allowlist must permit every model")
+	}
+
+	restricted := Identity{KeyID: "k2", AllowedModels: []string{"gpt-5", "combo-a"}}
+	for _, model := range []string{"gpt-5", "combo-a"} {
+		if !restricted.Allows(model) {
+			t.Errorf("Allows(%q) = false, want true", model)
+		}
+	}
+	for _, model := range []string{"claude", "gpt-5-mini", "", "GPT-5"} {
+		if restricted.Allows(model) {
+			t.Errorf("Allows(%q) = true, want false", model)
+		}
+	}
+}
+
+func TestAuthenticateCarriesAllowlist(t *testing.T) {
+	ctx := context.Background()
+	keys := newStore(t)
+
+	generated, err := GenerateKey("scoped")
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	generated.Record.AllowedModels = []string{"gpt-5"}
+	if err := keys.Create(ctx, generated.Record); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	id, err := NewService(true, nil, keys, nil).Authenticate(ctx, generated.Raw)
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	if !id.Allows("gpt-5") || id.Allows("claude") {
+		t.Errorf("identity allowlist = %v", id.AllowedModels)
+	}
+}
+
+func TestStaticKeyIsUnrestricted(t *testing.T) {
+	id, err := NewService(true, []string{"zr_static"}, nil, nil).
+		Authenticate(context.Background(), "zr_static")
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	if !id.Allows("anything") {
+		t.Error("a static key must reach every model")
+	}
+}
+
 func TestAuthenticateStoredKeyTouchesLastUsed(t *testing.T) {
 	ctx := context.Background()
 	keys := newStore(t)

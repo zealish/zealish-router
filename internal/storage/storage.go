@@ -27,6 +27,10 @@ type APIKey struct {
 	// MonthlyBudgetUSD caps spend in the current calendar month. 0 means
 	// unlimited.
 	MonthlyBudgetUSD float64
+	// AllowedModels restricts which aliases and combos the key may address.
+	// Empty means every model, which is what keys created before the
+	// allowlist shipped report.
+	AllowedModels []string
 }
 
 // Provider is an upstream endpoint configuration.
@@ -116,6 +120,9 @@ type APIKeyStore interface {
 	TouchLastUsed(ctx context.Context, id string, at time.Time) error
 	// SetQuota replaces the rate limit and monthly budget of one key.
 	SetQuota(ctx context.Context, id string, perMin int, budgetUSD float64) error
+	// SetAllowedModels replaces the model allowlist of one key. An empty
+	// slice clears the restriction.
+	SetAllowedModels(ctx context.Context, id string, models []string) error
 	Delete(ctx context.Context, id string) error
 }
 
@@ -454,6 +461,18 @@ func (s *memoryAPIKeys) SetQuota(_ context.Context, id string, perMin int, budge
 	}
 	key.RateLimitPerMin = perMin
 	key.MonthlyBudgetUSD = budgetUSD
+	s.items[id] = key
+	return nil
+}
+
+func (s *memoryAPIKeys) SetAllowedModels(_ context.Context, id string, models []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key, ok := s.items[id]
+	if !ok {
+		return ErrNotFound
+	}
+	key.AllowedModels = models
 	s.items[id] = key
 	return nil
 }

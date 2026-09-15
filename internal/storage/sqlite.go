@@ -176,10 +176,12 @@ type sqliteAPIKeys struct {
 
 func (s *sqliteAPIKeys) Create(ctx context.Context, key APIKey) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO api_keys (id, name, key_hash, enabled, created_at, last_used_at)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO api_keys (id, name, key_hash, enabled, created_at, last_used_at,
+		 rate_limit_per_min, monthly_budget_usd, allowed_models)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		key.ID, key.Name, key.KeyHash, key.Enabled,
-		key.CreatedAt.Unix(), unixOrZero(key.LastUsedAt))
+		key.CreatedAt.Unix(), unixOrZero(key.LastUsedAt),
+		key.RateLimitPerMin, key.MonthlyBudgetUSD, encodeFallback(key.AllowedModels))
 	if err != nil {
 		return fmt.Errorf("storage: create api key: %w", err)
 	}
@@ -243,6 +245,16 @@ func (s *sqliteAPIKeys) SetQuota(ctx context.Context, id string, perMin int, bud
 	return affectOne(res, "set api key quota")
 }
 
+func (s *sqliteAPIKeys) SetAllowedModels(ctx context.Context, id string, models []string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE api_keys SET allowed_models = ? WHERE id = ?`,
+		encodeFallback(models), id)
+	if err != nil {
+		return fmt.Errorf("storage: set api key allowlist: %w", err)
+	}
+	return affectOne(res, "set api key allowlist")
+}
+
 func (s *sqliteAPIKeys) Delete(ctx context.Context, id string) error {
 	res, err := s.db.ExecContext(ctx, `DELETE FROM api_keys WHERE id = ?`, id)
 	if err != nil {
@@ -257,22 +269,24 @@ type scanner interface {
 }
 
 const apiKeyColumns = `id, name, key_hash, enabled, created_at, last_used_at,
-	rate_limit_per_min, monthly_budget_usd`
+	rate_limit_per_min, monthly_budget_usd, allowed_models`
 
 func scanAPIKey(src scanner) (APIKey, error) {
 	var (
 		key      APIKey
 		created  int64
 		lastUsed int64
+		allowed  string
 	)
 	if err := src.Scan(&key.ID, &key.Name, &key.KeyHash, &key.Enabled, &created, &lastUsed,
-		&key.RateLimitPerMin, &key.MonthlyBudgetUSD); err != nil {
+		&key.RateLimitPerMin, &key.MonthlyBudgetUSD, &allowed); err != nil {
 		return APIKey{}, err
 	}
 	key.CreatedAt = time.Unix(created, 0).UTC()
 	if lastUsed > 0 {
 		key.LastUsedAt = time.Unix(lastUsed, 0).UTC()
 	}
+	key.AllowedModels = decodeFallback(allowed)
 	return key, nil
 }
 

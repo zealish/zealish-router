@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"sort"
 
+	"github.com/zealish/zealish-router/internal/auth"
 	"github.com/zealish/zealish-router/internal/metrics"
 	"github.com/zealish/zealish-router/internal/provider"
 	"github.com/zealish/zealish-router/internal/router"
@@ -29,13 +30,19 @@ func (h *handler) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-func (h *handler) listModels(w http.ResponseWriter, _ *http.Request) {
+func (h *handler) listModels(w http.ResponseWriter, r *http.Request) {
 	// Combos are addressable model names too, so clients see one flat list.
 	names := append(h.engine.Aliases(), h.engine.Combos()...)
 	sort.Strings(names)
 
+	// A key with an allowlist only discovers what it may actually call.
+	identity, _ := auth.FromContext(r.Context())
+
 	list := openai.ModelList{Object: "list", Data: make([]openai.Model, 0, len(names))}
 	for _, name := range names {
+		if !identity.Allows(name) {
+			continue
+		}
 		list.Data = append(list.Data, openai.Model{
 			ID:           name,
 			Object:       "model",
@@ -43,6 +50,20 @@ func (h *handler) listModels(w http.ResponseWriter, _ *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, list)
+}
+
+// allowModel rejects a request whose model is outside the key's allowlist. The
+// check lives here rather than in a middleware because the model name is in
+// the body, which only the handler has decoded.
+func allowModel(w http.ResponseWriter, r *http.Request, model string) bool {
+	identity, ok := auth.FromContext(r.Context())
+	if !ok || identity.Allows(model) {
+		return true
+	}
+	// 403, not 404: the model may well exist, this key just cannot reach it.
+	writeError(w, http.StatusForbidden, "invalid_request_error",
+		"Model '"+model+"' is not permitted for this API key.")
+	return false
 }
 
 func (h *handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
@@ -53,6 +74,9 @@ func (h *handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Model == "" {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "Field 'model' is required.")
+		return
+	}
+	if !allowModel(w, r, req.Model) {
 		return
 	}
 
@@ -81,6 +105,9 @@ func (h *handler) embeddings(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(req.Input) == 0 {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "Field 'input' is required.")
+		return
+	}
+	if !allowModel(w, r, req.Model) {
 		return
 	}
 

@@ -205,3 +205,63 @@ func TestDuplicateHashRejected(t *testing.T) {
 		t.Fatal("expected a uniqueness violation on key_hash")
 	}
 }
+
+func TestAPIKeyAllowedModelsRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	keys := newTestStore(t).APIKeys()
+
+	created := sampleKey("k1", "hash-1")
+	created.AllowedModels = []string{"gpt-5", "claude"}
+	if err := keys.Create(ctx, created); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got, err := keys.GetByHash(ctx, "hash-1")
+	if err != nil {
+		t.Fatalf("GetByHash: %v", err)
+	}
+	if len(got.AllowedModels) != 2 || got.AllowedModels[0] != "gpt-5" || got.AllowedModels[1] != "claude" {
+		t.Fatalf("AllowedModels = %v, want [gpt-5 claude]", got.AllowedModels)
+	}
+
+	if err := keys.SetAllowedModels(ctx, "k1", []string{"only"}); err != nil {
+		t.Fatalf("SetAllowedModels: %v", err)
+	}
+	if got, err = keys.GetByHash(ctx, "hash-1"); err != nil {
+		t.Fatalf("GetByHash after set: %v", err)
+	}
+	if len(got.AllowedModels) != 1 || got.AllowedModels[0] != "only" {
+		t.Errorf("AllowedModels = %v, want [only]", got.AllowedModels)
+	}
+
+	// An empty slice clears the restriction rather than storing a blank entry.
+	if err := keys.SetAllowedModels(ctx, "k1", nil); err != nil {
+		t.Fatalf("SetAllowedModels(nil): %v", err)
+	}
+	if got, err = keys.GetByHash(ctx, "hash-1"); err != nil {
+		t.Fatalf("GetByHash after clear: %v", err)
+	}
+	if len(got.AllowedModels) != 0 {
+		t.Errorf("AllowedModels = %v, want empty", got.AllowedModels)
+	}
+
+	if err := keys.SetAllowedModels(ctx, "missing", []string{"x"}); !errors.Is(err, ErrNotFound) {
+		t.Errorf("unknown id: err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestAPIKeyWithoutAllowlistReadsAsUnrestricted(t *testing.T) {
+	ctx := context.Background()
+	keys := newTestStore(t).APIKeys()
+
+	if err := keys.Create(ctx, sampleKey("k1", "hash-1")); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	got, err := keys.GetByHash(ctx, "hash-1")
+	if err != nil {
+		t.Fatalf("GetByHash: %v", err)
+	}
+	if len(got.AllowedModels) != 0 {
+		t.Errorf("AllowedModels = %v, want empty for a key created without one", got.AllowedModels)
+	}
+}

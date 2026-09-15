@@ -10,6 +10,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -28,6 +29,19 @@ type Identity struct {
 	Name             string
 	RateLimitPerMin  int
 	MonthlyBudgetUSD float64
+	// AllowedModels restricts which model names the caller may address. Empty
+	// means every model, which is what static keys and pre-allowlist keys get.
+	AllowedModels []string
+}
+
+// Allows reports whether the identity may address a model name. It is an
+// exact match against the allowlist: aliases and combos share one namespace,
+// so no prefix or pattern logic is needed.
+func (i Identity) Allows(model string) bool {
+	if len(i.AllowedModels) == 0 {
+		return true
+	}
+	return slices.Contains(i.AllowedModels, model)
 }
 
 // Authenticator validates credentials presented by clients.
@@ -108,6 +122,7 @@ func (s *Service) Authenticate(ctx context.Context, rawKey string) (Identity, er
 				Name:             key.Name,
 				RateLimitPerMin:  key.RateLimitPerMin,
 				MonthlyBudgetUSD: key.MonthlyBudgetUSD,
+				AllowedModels:    key.AllowedModels,
 			}, nil
 		}
 	}

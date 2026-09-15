@@ -232,6 +232,7 @@ version                      print the build version
 | `GET` | `/api/v1/usage/keys` | Spend and tokens per API key for a window (`?hours=`) |
 | `GET` `POST` `DELETE` | `/api/v1/keys[/{id}]` | Gateway keys; the raw key is returned only on create |
 | `PUT` | `/api/v1/keys/{id}/quota` | Set a key's `rate_limit_per_min` and `monthly_budget_usd` |
+| `PUT` | `/api/v1/keys/{id}/models` | Set a key's `allowed_models`; an empty list means every model |
 | `GET` | `/api/v1/provider-catalog` | Presets for known upstreams |
 | `GET` `PUT` `DELETE` | `/api/v1/providers[/{name}]` | Providers; secrets are never serialised back, an omitted `api_key` keeps the stored one |
 | `GET` `POST` | `/api/v1/providers/{name}/catalog`, `…/import` | List a provider's upstream models and import them as aliases |
@@ -411,6 +412,15 @@ Limited keys get `X-RateLimit-Limit` and `X-RateLimit-Remaining` on every
 response. Budget totals are cached for 30 seconds, so a key may overshoot
 slightly under burst traffic — the budget is a cost guardrail, not a ledger.
 Static keys and requests made with `auth.enabled: false` are unmetered.
+
+### Per-key model allowlist
+
+A key also carries an optional `allowed_models` list, editable from the
+dashboard or `PUT /api/v1/keys/{id}/models`. An empty list — the default — lets
+the key address every alias and combo. Otherwise only the listed names are
+reachable: anything else returns `403`, and `GET /v1/models` lists only what
+the key may actually call. Names are matched exactly against the aliases and
+combos the engine serves, and rejected at configuration time if unknown.
 
 ---
 

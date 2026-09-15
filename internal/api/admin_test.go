@@ -847,3 +847,78 @@ func TestProviderWithoutOverrideReportsNull(t *testing.T) {
 		t.Errorf("breaker_cooldown_ms = %v, want null", *providers[0].BreakerCooldownMS)
 	}
 }
+
+func TestAdminKeyAllowlistLifecycle(t *testing.T) {
+	h, _, _ := newAdminServer(t)
+
+	adminRequest(t, h, http.MethodPut, "/api/v1/providers/openai",
+		`{"kind":"openai","base_url":"https://api.openai.com/v1","api_key":"sk-test","enabled":true}`)
+	adminRequest(t, h, http.MethodPut, "/api/v1/models/gpt-5",
+		`{"provider":"openai","model":"gpt-5-upstream"}`)
+
+	created := decodeJSON[createKeyResponse](t,
+		adminRequest(t, h, http.MethodPost, "/api/v1/keys",
+			`{"name":"scoped","allowed_models":["gpt-5"]}`))
+	if !slices.Equal(created.AllowedModels, []string{"gpt-5"}) {
+		t.Fatalf("allowed_models = %v, want [gpt-5]", created.AllowedModels)
+	}
+
+	listed := decodeJSON[[]apiKeyResponse](t, adminRequest(t, h, http.MethodGet, "/api/v1/keys", ""))
+	if len(listed) != 1 || !slices.Equal(listed[0].AllowedModels, []string{"gpt-5"}) {
+		t.Fatalf("listed allowed_models = %+v", listed)
+	}
+
+	// Clearing the list restores unrestricted access.
+	if got := adminRequest(t, h, http.MethodPut, "/api/v1/keys/"+created.ID+"/models",
+		`{"allowed_models":[]}`).Code; got != http.StatusNoContent {
+		t.Fatalf("clear status = %d, want 204", got)
+	}
+	listed = decodeJSON[[]apiKeyResponse](t, adminRequest(t, h, http.MethodGet, "/api/v1/keys", ""))
+	if len(listed[0].AllowedModels) != 0 {
+		t.Errorf("allowed_models = %v, want empty after clearing", listed[0].AllowedModels)
+	}
+}
+
+func TestAdminKeyAllowlistRejectsUnknownModel(t *testing.T) {
+	h, _, _ := newAdminServer(t)
+
+	if got := adminRequest(t, h, http.MethodPost, "/api/v1/keys",
+		`{"name":"scoped","allowed_models":["ghost"]}`).Code; got != http.StatusBadRequest {
+		t.Errorf("create status = %d, want 400 for an unknown model", got)
+	}
+
+	created := decodeJSON[createKeyResponse](t,
+		adminRequest(t, h, http.MethodPost, "/api/v1/keys", `{"name":"open"}`))
+	if got := adminRequest(t, h, http.MethodPut, "/api/v1/keys/"+created.ID+"/models",
+		`{"allowed_models":["ghost"]}`).Code; got != http.StatusBadRequest {
+		t.Errorf("update status = %d, want 400 for an unknown model", got)
+	}
+}
+
+func TestAdminKeyAllowlistAcceptsCombos(t *testing.T) {
+	h, _, _ := newAdminServer(t)
+
+	adminRequest(t, h, http.MethodPut, "/api/v1/providers/openai",
+		`{"kind":"openai","base_url":"https://api.openai.com/v1","api_key":"sk-test","enabled":true}`)
+	adminRequest(t, h, http.MethodPut, "/api/v1/models/gpt-5",
+		`{"provider":"openai","model":"gpt-5-upstream"}`)
+	adminRequest(t, h, http.MethodPut, "/api/v1/combos/pool",
+		`{"strategy":"fallback","members":["gpt-5"],"enabled":true}`)
+
+	created := decodeJSON[createKeyResponse](t,
+		adminRequest(t, h, http.MethodPost, "/api/v1/keys",
+			`{"name":"scoped","allowed_models":["pool","pool","gpt-5"]}`))
+	// Duplicates collapse; combos and aliases share one namespace.
+	if !slices.Equal(created.AllowedModels, []string{"pool", "gpt-5"}) {
+		t.Errorf("allowed_models = %v, want [pool gpt-5]", created.AllowedModels)
+	}
+}
+
+func TestAdminKeyAllowlistUnknownKeyReturns404(t *testing.T) {
+	h, _, _ := newAdminServer(t)
+
+	if got := adminRequest(t, h, http.MethodPut, "/api/v1/keys/missing/models",
+		`{"allowed_models":[]}`).Code; got != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", got)
+	}
+}

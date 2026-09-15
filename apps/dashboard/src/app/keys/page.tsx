@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { toast } from "sonner";
-import { Check, Copy, Gauge, Trash2 } from "lucide-react";
+import { Check, Copy, Gauge, ListFilter, Trash2 } from "lucide-react";
 import type { ColumnDef } from "@tanstack/react-table";
 import {
   DataTable,
@@ -25,11 +25,21 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "@/components/ui/command";
+import {
   api,
   ApiError,
   ROUTER_URL,
   type ApiKey,
+  type Combo,
   type CreatedApiKey,
+  type ModelAlias,
 } from "@/lib/api";
 import { useResource } from "@/lib/use-resource";
 
@@ -41,6 +51,18 @@ export default function KeysPage() {
   const [quotaKey, setQuotaKey] = useState<ApiKey>();
   const [perMin, setPerMin] = useState("0");
   const [budget, setBudget] = useState("0");
+  const [modelsKey, setModelsKey] = useState<ApiKey>();
+  const [allowed, setAllowed] = useState<string[]>([]);
+  const [picking, setPicking] = useState(false);
+  const aliases = useResource<ModelAlias[]>("/models");
+  const combos = useResource<Combo[]>("/combos");
+
+  // Aliases and combos share one addressable namespace, so the picker offers
+  // both under a single list.
+  const modelNames = [
+    ...(aliases.data ?? []).map((m) => m.alias),
+    ...(combos.data ?? []).map((c) => c.name),
+  ].sort();
 
   const create = async () => {
     if (!name) return;
@@ -83,6 +105,29 @@ export default function KeysPage() {
       });
       toast.success(`Updated limits for '${quotaKey.name}'.`);
       setQuotaKey(undefined);
+      await reload();
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const openModels = (key: ApiKey) => {
+    setAllowed(key.allowed_models ?? []);
+    setPicking(false);
+    setModelsKey(key);
+  };
+
+  const saveModels = async () => {
+    if (!modelsKey) return;
+    setSaving(true);
+    try {
+      await api.put(`/keys/${encodeURIComponent(modelsKey.id)}/models`, {
+        allowed_models: allowed,
+      });
+      toast.success(`Updated models for '${modelsKey.name}'.`);
+      setModelsKey(undefined);
       await reload();
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : String(err));
@@ -156,7 +201,9 @@ export default function KeysPage() {
         <DataTableColumnHeader column={column} title="Total cost" />
       ),
       cell: ({ row }) => (
-        <span className="tabular-nums">{formatCost(row.original.cost_usd)}</span>
+        <span className="tabular-nums">
+          {formatCost(row.original.cost_usd)}
+        </span>
       ),
     },
     {
@@ -195,6 +242,24 @@ export default function KeysPage() {
         ),
     },
     {
+      id: "allowed_models",
+      accessorFn: (key) => key.allowed_models?.length ?? 0,
+      header: ({ column }) => (
+        <DataTableColumnHeader column={column} title="Models" />
+      ),
+      cell: ({ row }) => {
+        const models = row.original.allowed_models ?? [];
+        if (models.length === 0) {
+          return <span className="text-muted-foreground text-xs">all</span>;
+        }
+        return (
+          <span className="font-mono text-xs" title={models.join(", ")}>
+            {models.length === 1 ? models[0] : `${models.length} models`}
+          </span>
+        );
+      },
+    },
+    {
       id: "actions",
       header: "",
       enableSorting: false,
@@ -204,6 +269,10 @@ export default function KeysPage() {
           <DropdownMenuItem onSelect={() => openQuota(row.original)}>
             <Gauge />
             Edit limits
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => openModels(row.original)}>
+            <ListFilter />
+            Allowed models
           </DropdownMenuItem>
           <DropdownMenuItem
             variant="destructive"
@@ -367,6 +436,101 @@ export default function KeysPage() {
               Cancel
             </Button>
             <Button type="submit" form="quota-form" disabled={saving}>
+              Save
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={modelsKey !== undefined}
+        onOpenChange={(open) => !open && setModelsKey(undefined)}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Allowed models for {modelsKey?.name}</DialogTitle>
+            <DialogDescription>
+              An empty list lets the key address every model. Otherwise only the
+              selected names are reachable; anything else returns 403.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            {allowed.length === 0 ? (
+              <p className="text-muted-foreground text-sm">
+                No restriction — every model is reachable.
+              </p>
+            ) : (
+              <ul className="space-y-1">
+                {allowed.map((model) => (
+                  <li
+                    key={model}
+                    className="flex items-center gap-2 rounded-md border px-3 py-1.5"
+                  >
+                    <span className="font-mono text-xs break-all">{model}</span>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="ml-auto"
+                      onClick={() =>
+                        setAllowed(allowed.filter((m) => m !== model))
+                      }
+                    >
+                      <Trash2 />
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {picking ? (
+              <Command className="border">
+                <CommandInput placeholder="Search models…" autoFocus />
+                <CommandList>
+                  <CommandEmpty>No model found.</CommandEmpty>
+                  <CommandGroup>
+                    {modelNames
+                      .filter((m) => !allowed.includes(m))
+                      .map((model) => (
+                        <CommandItem
+                          key={model}
+                          value={model}
+                          onSelect={() => {
+                            setAllowed([...allowed, model]);
+                            setPicking(false);
+                          }}
+                        >
+                          <span className="font-mono text-xs break-all">
+                            {model}
+                          </span>
+                        </CommandItem>
+                      ))}
+                  </CommandGroup>
+                </CommandList>
+              </Command>
+            ) : (
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full"
+                onClick={() => setPicking(true)}
+              >
+                Add model
+              </Button>
+            )}
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              type="button"
+              onClick={() => setModelsKey(undefined)}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              disabled={saving}
+              onClick={() => void saveModels()}
+            >
               Save
             </Button>
           </DialogFooter>
