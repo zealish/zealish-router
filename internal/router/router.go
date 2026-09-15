@@ -63,6 +63,10 @@ type routes struct {
 	combos   map[string]storage.Combo
 	cursors  map[string]*atomic.Uint64
 	registry *provider.Registry
+	// engine backlinks to the live health and statistics the intelligent
+	// strategy ranks on. Those outlive any single table, so they are read
+	// through the engine rather than copied into the snapshot.
+	engine *Engine
 }
 
 // Engine dispatches chat completions to providers using alias and fallback
@@ -151,7 +155,7 @@ func (e *Engine) Reload(aliases []storage.ModelAlias, combos []storage.Combo, re
 		pools[c.Name] = c
 		cursors[c.Name] = &atomic.Uint64{}
 	}
-	e.routes.Store(&routes{models: models, combos: pools, cursors: cursors, registry: registry})
+	e.routes.Store(&routes{models: models, combos: pools, cursors: cursors, registry: registry, engine: e})
 }
 
 // Aliases returns every configured model alias.
@@ -212,6 +216,26 @@ func (rt *routes) resolve(name string) (Route, error) {
 	return Route{Alias: name, Provider: m.Provider, Model: m.Model}, nil
 }
 
+// Capabilities reports what a routable name serves. An alias reports its own
+// set; a combo reports the union of its members', since any member may take
+// the request. An unknown or unclassified name reports nothing.
+func (e *Engine) Capabilities(name string) []string {
+	rt := e.routes.Load()
+	if m, ok := rt.models[name]; ok {
+		return provider.NormalizeCapabilities(m.Capabilities)
+	}
+
+	combo, ok := rt.combos[name]
+	if !ok {
+		return nil
+	}
+	union := make([]string, 0, len(combo.Members))
+	for _, member := range combo.Members {
+		union = append(union, rt.models[member].Capabilities...)
+	}
+	return provider.NormalizeCapabilities(union)
+}
+
 // Chain returns the deterministic attempt order for a model name: for an alias
 // the alias itself followed by its configured fallbacks, for a combo its
 // members in strategy order, each followed by its own fallbacks. Duplicates
@@ -262,6 +286,8 @@ func (rt *routes) entrypoints(name string) []string {
 		return rotate(combo.Members, int(rt.cursors[name].Add(1)-1)%len(combo.Members))
 	case storage.ComboWeighted:
 		return rotate(combo.Members, weightedPick(combo.Members, combo.Weights, rt.cursors[name].Add(1)-1))
+	case storage.ComboIntelligent:
+		return rt.intelligentOrder(combo, rt.cursors[name].Add(1)-1)
 	default:
 		return combo.Members
 	}

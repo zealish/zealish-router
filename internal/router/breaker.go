@@ -153,6 +153,23 @@ func (b *breakers) get(name string) *breaker {
 	return br
 }
 
+// phase reports a provider's current circuit state without admitting a probe.
+// A provider whose cooldown has elapsed reads as half-open: the next request
+// through allow would be admitted as the probe.
+func (b *breakers) phase(name string) CircuitState {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	br, ok := b.state[name]
+	if !ok || b.policyFor(name).FailureThreshold <= 0 {
+		return CircuitClosed
+	}
+	if br.state == CircuitOpen && b.now().Sub(br.openedAt) >= b.policyFor(name).Cooldown {
+		return CircuitHalfOpen
+	}
+	return br.state
+}
+
 // allow reports whether a request may be sent to the provider. An open circuit
 // whose cooldown has elapsed transitions to half-open and admits exactly one
 // probe; further callers are rejected until that probe reports back.

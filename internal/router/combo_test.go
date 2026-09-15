@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zealish/zealish-router/internal/provider"
 	"github.com/zealish/zealish-router/internal/storage"
@@ -47,6 +48,27 @@ func TestComboChainExpandsMembersAndTheirFallbacks(t *testing.T) {
 	want := []string{"gpt-5", "local", "fast"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("chain = %v, want %v", got, want)
+	}
+}
+
+// A combo reports the union of its members' capabilities: any member may take
+// the request, so the combo serves whatever any of them serves.
+func TestComboCapabilitiesAreTheMemberUnion(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	e := NewEngine(logger, nil)
+	e.Reload([]storage.ModelAlias{
+		{Alias: "gpt-5", Provider: "openai", Model: "m", Capabilities: []string{"chat", "vision"}},
+		{Alias: "fast", Provider: "openrouter", Model: "m", Capabilities: []string{"chat", "tools"}},
+	}, []storage.Combo{fallbackCombo("gpt-5", "fast")}, provider.NewRegistry())
+
+	if got := strings.Join(e.Capabilities("code-agent"), ","); got != "chat,vision,tools" {
+		t.Errorf("combo capabilities = %q, want chat,vision,tools", got)
+	}
+	if got := strings.Join(e.Capabilities("gpt-5"), ","); got != "chat,vision" {
+		t.Errorf("alias capabilities = %q, want chat,vision", got)
+	}
+	if got := e.Capabilities("ghost"); got != nil {
+		t.Errorf("unknown name capabilities = %v, want nil", got)
 	}
 }
 
@@ -171,6 +193,108 @@ func TestComboWeightedTreatsMissingWeightsAsEqual(t *testing.T) {
 		if resp.ID != served {
 			t.Errorf("request %d served by %q, want %q", i, resp.ID, served)
 		}
+	}
+}
+
+func intelligentCombo(members ...string) storage.Combo {
+	return storage.Combo{
+		Name:     "code-agent",
+		Strategy: storage.ComboIntelligent,
+		Members:  members,
+		Enabled:  true,
+	}
+}
+
+// With no history every member scores neutral, so the pool keeps rotating:
+// a cold combo explores instead of pinning traffic on its first member.
+func TestComboIntelligentRotatesWithoutHistory(t *testing.T) {
+	e := newComboEngine(t, intelligentCombo("gpt-5", "fast", "local"),
+		&fakeProvider{name: "openai"},
+		&fakeProvider{name: "openrouter"},
+		&fakeProvider{name: "ollama"},
+	)
+
+	want := []string{"openai", "openrouter", "ollama"}
+	for i, served := range want {
+		resp, err := e.ChatCompletion(context.Background(), &openai.ChatCompletionRequest{Model: "code-agent"})
+		if err != nil {
+			t.Fatalf("request %d: %v", i, err)
+		}
+		if resp.ID != served {
+			t.Errorf("request %d served by %q, want %q", i, resp.ID, served)
+		}
+	}
+}
+
+func TestComboIntelligentPrefersTheHealthierMember(t *testing.T) {
+	e := newComboEngine(t, intelligentCombo("gpt-5", "fast"),
+		&fakeProvider{name: "openai"},
+		&fakeProvider{name: "openrouter"},
+	)
+
+	// "gpt-5" answers half the time, "fast" always: the record must outweigh
+	// the rotation that would otherwise start at gpt-5.
+	for range 12 {
+		e.stats.Record(RequestMetric{Alias: "gpt-5", Success: false, LatencyMs: 900, Timestamp: time.Now()})
+		e.stats.Record(RequestMetric{Alias: "gpt-5", Success: true, LatencyMs: 900, Timestamp: time.Now()})
+		e.stats.Record(RequestMetric{Alias: "fast", Success: true, LatencyMs: 900, Timestamp: time.Now()})
+		e.stats.Record(RequestMetric{Alias: "fast", Success: true, LatencyMs: 900, Timestamp: time.Now()})
+	}
+
+	for i := range 3 {
+		resp, err := e.ChatCompletion(context.Background(), &openai.ChatCompletionRequest{Model: "code-agent"})
+		if err != nil {
+			t.Fatalf("request %d: %v", i, err)
+		}
+		if resp.ID != "openrouter" {
+			t.Errorf("request %d served by %q, want openrouter", i, resp.ID)
+		}
+	}
+}
+
+// Equal success rates are broken by latency: the faster route goes first.
+func TestComboIntelligentPrefersTheFasterMember(t *testing.T) {
+	e := newComboEngine(t, intelligentCombo("gpt-5", "fast"),
+		&fakeProvider{name: "openai"},
+		&fakeProvider{name: "openrouter"},
+	)
+
+	for range 20 {
+		e.stats.Record(RequestMetric{Alias: "gpt-5", Success: true, LatencyMs: 8000, Timestamp: time.Now()})
+		e.stats.Record(RequestMetric{Alias: "fast", Success: true, LatencyMs: 200, Timestamp: time.Now()})
+	}
+
+	resp, err := e.ChatCompletion(context.Background(), &openai.ChatCompletionRequest{Model: "code-agent"})
+	if err != nil {
+		t.Fatalf("ChatCompletion: %v", err)
+	}
+	if resp.ID != "openrouter" {
+		t.Errorf("served by %q, want the faster openrouter", resp.ID)
+	}
+}
+
+// An open circuit ranks below every routable member, however good its history.
+func TestComboIntelligentDemotesAnOpenCircuit(t *testing.T) {
+	e := newComboEngine(t, intelligentCombo("gpt-5", "fast"),
+		&fakeProvider{name: "openai"},
+		&fakeProvider{name: "openrouter"},
+	)
+
+	for range 20 {
+		e.stats.Record(RequestMetric{Alias: "gpt-5", Success: true, LatencyMs: 100, Timestamp: time.Now()})
+		e.stats.Record(RequestMetric{Alias: "fast", Success: false, LatencyMs: 5000, Timestamp: time.Now()})
+		e.stats.Record(RequestMetric{Alias: "fast", Success: true, LatencyMs: 5000, Timestamp: time.Now()})
+	}
+	for range DefaultBreaker.FailureThreshold {
+		e.breakers.failure("openai")
+	}
+
+	resp, err := e.ChatCompletion(context.Background(), &openai.ChatCompletionRequest{Model: "code-agent"})
+	if err != nil {
+		t.Fatalf("ChatCompletion: %v", err)
+	}
+	if resp.ID != "openrouter" {
+		t.Errorf("served by %q, want openrouter: openai's circuit is open", resp.ID)
 	}
 }
 

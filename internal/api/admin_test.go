@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -233,6 +234,41 @@ func TestAdminProviderMutationRepublishesRoutes(t *testing.T) {
 	}
 	if _, err := engine.Resolve("gpt-5"); err == nil {
 		t.Error("deleted alias still resolves")
+	}
+}
+
+// Capabilities are inferred from the upstream model name when the request
+// omits them, so importing or adding a well-known model needs no hand-tagging.
+func TestAdminAliasInfersCapabilities(t *testing.T) {
+	h, _, engine := newAdminServer(t)
+
+	adminRequest(t, h, http.MethodPut, "/api/v1/providers/openai",
+		`{"kind":"openai","base_url":"https://api.openai.com/v1","api_key":"sk-test","enabled":true}`)
+
+	rec := adminRequest(t, h, http.MethodPut, "/api/v1/models/gpt-4o",
+		`{"provider":"openai","model":"gpt-4o"}`)
+	got := decodeJSON[modelResponse](t, rec)
+	if !slices.Contains(got.Capabilities, provider.CapVision) {
+		t.Errorf("capabilities = %v, want vision inferred for gpt-4o", got.Capabilities)
+	}
+	if !slices.Equal(engine.Capabilities("gpt-4o"), got.Capabilities) {
+		t.Errorf("engine capabilities = %v, want %v", engine.Capabilities("gpt-4o"), got.Capabilities)
+	}
+
+	// An explicit list overrides the guess, and unknown entries are dropped.
+	rec = adminRequest(t, h, http.MethodPut, "/api/v1/models/gpt-4o",
+		`{"provider":"openai","model":"gpt-4o","capabilities":["chat","telepathy"]}`)
+	got = decodeJSON[modelResponse](t, rec)
+	if !slices.Equal(got.Capabilities, []string{provider.CapChat}) {
+		t.Errorf("capabilities = %v, want [chat]", got.Capabilities)
+	}
+
+	// An explicit empty list states "unclassified" rather than accepting the
+	// inferred set.
+	rec = adminRequest(t, h, http.MethodPut, "/api/v1/models/gpt-4o",
+		`{"provider":"openai","model":"gpt-4o","capabilities":[]}`)
+	if got = decodeJSON[modelResponse](t, rec); len(got.Capabilities) != 0 {
+		t.Errorf("capabilities = %v, want empty", got.Capabilities)
 	}
 }
 

@@ -290,6 +290,7 @@ accounts.
 | `fallback` | Always start at the first member and cascade down the pool. |
 | `round_robin` | Rotate the starting member per request to spread quota, then cascade. |
 | `weighted` | Rotate the starting member in proportion to its weight, then cascade. |
+| `intelligent` | Order the pool per request by live health, success rate and latency, then cascade. |
 
 ```sh
 curl -X PUT http://localhost:8787/api/v1/combos/code-agent \
@@ -308,6 +309,20 @@ curl -X PUT http://localhost:8787/api/v1/combos/code-agent \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"strategy":"weighted","members":["gpt-5","fast","local"],"weights":[3,1,2],"enabled":true}'
+```
+
+`intelligent` needs no configuration: it ranks the pool on every request from
+what the router has just observed. Providers with an open circuit or a failed
+health probe sink to the bottom, and the rest are ordered by the rolling
+per-alias window — success rate first, median latency as the tiebreak. A member
+the router has not measured yet ranks top so it gets explored, and a window too
+thin to be confident only nudges the order rather than deciding it.
+
+```sh
+curl -X PUT http://localhost:8787/api/v1/combos/code-agent \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"strategy":"intelligent","members":["gpt-5","fast","local"],"enabled":true}'
 ```
 
 Combos are addressable wherever a model is: `"model": "code-agent"` on

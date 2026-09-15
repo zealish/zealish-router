@@ -112,7 +112,11 @@ export type ComboInput = {
   enabled: boolean;
 };
 
-export type ComboStrategy = "fallback" | "round_robin" | "weighted";
+export type ComboStrategy =
+  | "fallback"
+  | "round_robin"
+  | "weighted"
+  | "intelligent";
 
 /** Strategies, mirroring storage.ComboStrategy in internal/storage/storage.go. */
 export const COMBO_STRATEGIES: {
@@ -137,6 +141,12 @@ export const COMBO_STRATEGIES: {
     label: "Weighted",
     description:
       "Rotate the starting member in proportion to its weight, then cascade.",
+  },
+  {
+    id: "intelligent",
+    label: "Intelligent",
+    description:
+      "Order the pool per request by live health, success rate and latency, then cascade.",
   },
 ];
 
@@ -337,11 +347,30 @@ export type CatalogEntry = {
   docs?: string;
 };
 
+/** Capability ids, mirroring internal/provider/capability.go. */
+export type Capability =
+  | "chat"
+  | "vision"
+  | "tools"
+  | "embeddings"
+  | "reasoning"
+  | "streaming"
+  | "audio"
+  | "json_mode";
+
+/** One entry of the capability vocabulary, served by /capabilities. */
+export type CapabilityInfo = {
+  id: Capability;
+  label: string;
+  description: string;
+};
+
 export type ModelAlias = {
   alias: string;
   provider: string;
   model: string;
   fallback: string[];
+  capabilities: Capability[];
 };
 
 export type ModelTestResult = {
@@ -394,6 +423,8 @@ export type CatalogModel = {
   owned_by?: string;
   imported: boolean;
   alias?: string;
+  /** What importing this model would tag it with. */
+  capabilities: Capability[];
 };
 
 export type ImportModelsResult = {

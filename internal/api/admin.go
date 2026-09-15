@@ -73,6 +73,7 @@ func (h *adminHandler) routes(r chi.Router) {
 	r.Put("/models/{alias}", h.putAlias)
 	r.Delete("/models/{alias}", h.deleteAlias)
 	r.Post("/models/{alias}/test", h.testAlias)
+	r.Get("/capabilities", h.listCapabilities)
 
 	r.Get("/combos", h.listCombos)
 	r.Put("/combos/{name}", h.putCombo)
@@ -639,6 +640,9 @@ type catalogModelResponse struct {
 	OwnedBy  string `json:"owned_by,omitempty"`
 	Imported bool   `json:"imported"`
 	Alias    string `json:"alias,omitempty"`
+	// Capabilities previews what importing this model would tag it with, so
+	// the operator sees the guess before committing to it.
+	Capabilities []string `json:"capabilities"`
 }
 
 type importModelsRequest struct {
@@ -694,10 +698,11 @@ func (h *adminHandler) providerCatalog(w http.ResponseWriter, r *http.Request) {
 	for _, m := range models {
 		alias, imported := existing[m.ID]
 		out = append(out, catalogModelResponse{
-			ID:       m.ID,
-			OwnedBy:  m.OwnedBy,
-			Imported: imported,
-			Alias:    alias,
+			ID:           m.ID,
+			OwnedBy:      m.OwnedBy,
+			Imported:     imported,
+			Alias:        alias,
+			Capabilities: provider.InferCapabilities(m.ID),
 		})
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -747,7 +752,12 @@ func (h *adminHandler) importModels(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		record := storage.ModelAlias{Alias: alias, Provider: name, Model: model}
+		record := storage.ModelAlias{
+			Alias:        alias,
+			Provider:     name,
+			Model:        model,
+			Capabilities: provider.InferCapabilities(model),
+		}
 		if err := h.store.Models().Put(ctx, record); err != nil {
 			h.fail(w, err)
 			return
@@ -789,6 +799,41 @@ func upstreamMessage(err error) string {
 	return "Upstream request failed."
 }
 
+// --- capabilities ---
+
+type capabilityResponse struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+	// Description explains what the capability means, so the dashboard need
+	// not carry its own copy of the vocabulary.
+	Description string `json:"description"`
+}
+
+// capabilityLabels describes each capability for the dashboard. Keeping the
+// text here means one definition of the vocabulary, not two that drift.
+var capabilityLabels = map[string]capabilityResponse{
+	provider.CapChat:       {Label: "Chat", Description: "Ordinary conversation."},
+	provider.CapVision:     {Label: "Vision", Description: "Image input."},
+	provider.CapTools:      {Label: "Tools", Description: "Function / tool calling."},
+	provider.CapEmbeddings: {Label: "Embeddings", Description: "Serves /v1/embeddings."},
+	provider.CapReasoning:  {Label: "Reasoning", Description: "Long reasoning model."},
+	provider.CapStreaming:  {Label: "Streaming", Description: "SSE streaming."},
+	provider.CapAudio:      {Label: "Audio", Description: "Audio input/output."},
+	provider.CapJSONMode:   {Label: "JSON mode", Description: "Structured output."},
+}
+
+// listCapabilities serves the capability vocabulary in presentation order.
+func (h *adminHandler) listCapabilities(w http.ResponseWriter, _ *http.Request) {
+	ids := provider.Capabilities()
+	out := make([]capabilityResponse, 0, len(ids))
+	for _, id := range ids {
+		entry := capabilityLabels[id]
+		entry.ID = id
+		out = append(out, entry)
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
 // --- model aliases ---
 
 type modelResponse struct {
@@ -796,12 +841,18 @@ type modelResponse struct {
 	Provider string   `json:"provider"`
 	Model    string   `json:"model"`
 	Fallback []string `json:"fallback"`
+	// Capabilities lists what the route serves, in canonical order.
+	Capabilities []string `json:"capabilities"`
 }
 
 type modelRequest struct {
 	Provider string   `json:"provider"`
 	Model    string   `json:"model"`
 	Fallback []string `json:"fallback"`
+	// Capabilities is optional: omitted, the set is inferred from the upstream
+	// model name. An explicit empty array clears it, so an operator can state
+	// "unknown" rather than accept the guess.
+	Capabilities *[]string `json:"capabilities"`
 }
 
 func (h *adminHandler) listAliases(w http.ResponseWriter, r *http.Request) {
@@ -840,11 +891,17 @@ func (h *adminHandler) putAlias(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	capabilities := provider.InferCapabilities(req.Model)
+	if req.Capabilities != nil {
+		capabilities = provider.NormalizeCapabilities(*req.Capabilities)
+	}
+
 	record := storage.ModelAlias{
-		Alias:    urlParam(r, "alias"),
-		Provider: req.Provider,
-		Model:    req.Model,
-		Fallback: req.Fallback,
+		Alias:        urlParam(r, "alias"),
+		Provider:     req.Provider,
+		Model:        req.Model,
+		Fallback:     req.Fallback,
+		Capabilities: capabilities,
 	}
 	if err := h.store.Models().Put(ctx, record); err != nil {
 		h.fail(w, err)
@@ -949,7 +1006,17 @@ func toModelResponse(m storage.ModelAlias) modelResponse {
 	if fallback == nil {
 		fallback = []string{}
 	}
-	return modelResponse{Alias: m.Alias, Provider: m.Provider, Model: m.Model, Fallback: fallback}
+	capabilities := m.Capabilities
+	if capabilities == nil {
+		capabilities = []string{}
+	}
+	return modelResponse{
+		Alias:        m.Alias,
+		Provider:     m.Provider,
+		Model:        m.Model,
+		Fallback:     fallback,
+		Capabilities: capabilities,
+	}
 }
 
 // --- combos ---
@@ -999,10 +1066,10 @@ func (h *adminHandler) putCombo(w http.ResponseWriter, r *http.Request) {
 		strategy = storage.ComboFallback
 	}
 	switch strategy {
-	case storage.ComboFallback, storage.ComboRoundRobin, storage.ComboWeighted:
+	case storage.ComboFallback, storage.ComboRoundRobin, storage.ComboWeighted, storage.ComboIntelligent:
 	default:
 		writeError(w, http.StatusBadRequest, "invalid_request_error",
-			"Field 'strategy' must be 'fallback', 'round_robin' or 'weighted'.")
+			"Field 'strategy' must be 'fallback', 'round_robin', 'weighted' or 'intelligent'.")
 		return
 	}
 

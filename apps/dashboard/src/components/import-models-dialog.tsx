@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { Loader2, Search } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
+import { CapabilityBadges } from "@/components/capability-badges";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -226,6 +227,7 @@ function ImportModelsBody({
                       <span className="text-muted-foreground hidden min-w-0 flex-1 truncate font-mono text-xs sm:inline">
                         → {prefix + m.id}
                       </span>
+                      <CapabilityBadges capabilities={m.capabilities} compact />
                       {m.imported ? (
                         <Badge variant="secondary">{m.alias}</Badge>
                       ) : null}

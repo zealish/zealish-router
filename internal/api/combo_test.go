@@ -83,6 +83,20 @@ func TestAdminComboValidation(t *testing.T) {
 	}
 }
 
+func TestAdminComboAcceptsIntelligentStrategy(t *testing.T) {
+	h, _, engine := newAdminServer(t)
+	seedCombo(t, h)
+
+	rec := adminRequest(t, h, http.MethodPut, "/api/v1/combos/code-agent",
+		`{"strategy":"intelligent","members":["gpt-5","fast"],"enabled":true}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("put combo status = %d (body=%q)", rec.Code, rec.Body.String())
+	}
+	if chain := engine.Chain("code-agent"); len(chain) != 2 {
+		t.Errorf("chain = %v, want both members", chain)
+	}
+}
+
 func TestComboAppearsInModelList(t *testing.T) {
 	h, _, _ := newAdminServer(t)
 	seedCombo(t, h)

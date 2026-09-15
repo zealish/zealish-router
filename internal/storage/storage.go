@@ -64,6 +64,11 @@ type ModelAlias struct {
 	Provider string
 	Model    string
 	Fallback []string
+	// Capabilities advertises what the route serves: chat, vision, tools,
+	// embeddings, reasoning, streaming, audio, json_mode. It is generated on
+	// import and editable afterwards, so a custom provider is never stuck with
+	// a guess. Empty means the alias has not been classified.
+	Capabilities []string
 }
 
 // ComboStrategy selects how a combo picks the order of its member aliases.
@@ -77,6 +82,10 @@ const (
 	// ComboWeighted rotates the starting member per request in proportion to
 	// the member weights, then cascades.
 	ComboWeighted ComboStrategy = "weighted"
+	// ComboIntelligent orders the pool per request by observed behaviour —
+	// circuit and probe health first, then success rate and latency — so the
+	// member most likely to answer fastest is tried first.
+	ComboIntelligent ComboStrategy = "intelligent"
 )
 
 // Combo is a virtual model: one client-facing name backed by an ordered pool

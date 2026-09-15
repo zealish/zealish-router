@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 )
@@ -115,6 +116,48 @@ func TestModelAliasEmptyFallbackIsNil(t *testing.T) {
 	}
 	if got.Fallback != nil {
 		t.Errorf("fallback = %v, want nil", got.Fallback)
+	}
+}
+
+func TestModelAliasRoundTripsCapabilities(t *testing.T) {
+	ctx := context.Background()
+	models := newTestStore(t).Models()
+
+	want := []string{"chat", "vision", "streaming"}
+	if err := models.Put(ctx, ModelAlias{
+		Alias:        "gpt-4o",
+		Provider:     "openai",
+		Model:        "gpt-4o",
+		Capabilities: want,
+	}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	got, err := models.Get(ctx, "gpt-4o")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !slices.Equal(got.Capabilities, want) {
+		t.Errorf("capabilities = %v, want %v", got.Capabilities, want)
+	}
+}
+
+// An alias predating capabilities reads back unclassified, not as a model
+// that supports nothing.
+func TestModelAliasEmptyCapabilitiesIsNil(t *testing.T) {
+	ctx := context.Background()
+	models := newTestStore(t).Models()
+
+	if err := models.Put(ctx, ModelAlias{Alias: "solo", Provider: "openai", Model: "m"}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	got, err := models.Get(ctx, "solo")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Capabilities != nil {
+		t.Errorf("capabilities = %v, want nil", got.Capabilities)
 	}
 }
 

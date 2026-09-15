@@ -19,6 +19,10 @@ import {
   DataTableRowActions,
 } from "@/components/data-table";
 import { ImportModelsDialog } from "@/components/import-models-dialog";
+import {
+  CAPABILITIES,
+  CapabilityBadges,
+} from "@/components/capability-badges";
 import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -42,6 +46,7 @@ import {
   api,
   ApiError,
   type AliasMetrics,
+  type Capability,
   type Confidence,
   MIN_CONFIDENT_SAMPLES,
   type ModelAlias,
@@ -94,6 +99,7 @@ type Draft = {
   alias: string;
   model: string;
   fallback: string;
+  capabilities: Capability[];
 };
 
 /**
@@ -161,6 +167,7 @@ export default function ProviderDetailPage() {
           .split(",")
           .map((s) => s.trim())
           .filter(Boolean),
+        capabilities: draft.capabilities,
       });
       toast.success(`Saved alias '${draft.alias}'.`);
       setDraft(undefined);
@@ -277,6 +284,17 @@ export default function ProviderDetailPage() {
             ))}
           </div>
         ),
+    },
+    {
+      id: "capabilities",
+      accessorFn: (model) => model.capabilities.join(", "),
+      enableSorting: false,
+      header: ({ column }) => (
+        <DataTableColumnHeader column={column} title="Capabilities" />
+      ),
+      cell: ({ row }) => (
+        <CapabilityBadges capabilities={row.original.capabilities} compact />
+      ),
     },
     {
       id: "ttfb",
@@ -402,6 +420,7 @@ export default function ProviderDetailPage() {
                 alias: row.original.alias,
                 model: row.original.model,
                 fallback: row.original.fallback.join(", "),
+                capabilities: row.original.capabilities,
               });
               setEditing(true);
             }}
@@ -454,6 +473,9 @@ export default function ProviderDetailPage() {
                   alias: provider?.alias_prefix ?? "",
                   model: "",
                   fallback: "",
+                  // The conservative baseline every chat upstream serves; the
+                  // operator ticks the rest.
+                  capabilities: ["chat", "streaming"],
                 });
                 setEditing(false);
               }}
@@ -647,6 +669,39 @@ export default function ProviderDetailPage() {
                 <p className="text-muted-foreground text-xs">
                   Comma-separated aliases, not provider names. Each one is a
                   full route, so a fallback may point at another provider.
+                </p>
+              </div>
+              <div className="space-y-2">
+                <Label>Capabilities</Label>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {CAPABILITIES.map(({ id, label, description, icon: Icon }) => (
+                    <label
+                      key={id}
+                      title={description}
+                      className="hover:bg-muted/50 flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-sm"
+                    >
+                      <input
+                        type="checkbox"
+                        className="accent-primary size-4"
+                        checked={draft.capabilities.includes(id)}
+                        onChange={() =>
+                          setDraft({
+                            ...draft,
+                            capabilities: draft.capabilities.includes(id)
+                              ? draft.capabilities.filter((c) => c !== id)
+                              : [...draft.capabilities, id],
+                          })
+                        }
+                      />
+                      <Icon className="text-muted-foreground size-3.5" />
+                      {label}
+                    </label>
+                  ))}
+                </div>
+                <p className="text-muted-foreground text-xs">
+                  Advertised on /v1/models. Imported models are tagged
+                  automatically from their name; correct them here when a custom
+                  provider differs.
                 </p>
               </div>
             </form>

@@ -36,7 +36,11 @@ func (h *handler) listModels(w http.ResponseWriter, _ *http.Request) {
 
 	list := openai.ModelList{Object: "list", Data: make([]openai.Model, 0, len(names))}
 	for _, name := range names {
-		list.Data = append(list.Data, openai.Model{ID: name, Object: "model"})
+		list.Data = append(list.Data, openai.Model{
+			ID:           name,
+			Object:       "model",
+			Capabilities: h.engine.Capabilities(name),
+		})
 	}
 	writeJSON(w, http.StatusOK, list)
 }

@@ -302,6 +302,10 @@ type Model struct {
 	Object  string `json:"object"`
 	Created int64  `json:"created,omitempty"`
 	OwnedBy string `json:"owned_by,omitempty"`
+	// Capabilities is a gateway extension: what this route serves. It is
+	// omitted for unclassified models rather than sent empty, so a client
+	// cannot mistake "unknown" for "supports nothing".
+	Capabilities []string `json:"capabilities,omitempty"`
 }
 
 // ModelList is the response body of GET /v1/models.
