@@ -76,7 +76,7 @@ export const api = {
   get: <T>(path: string) => request<T>("GET", path),
   post: <T>(path: string, body: unknown) => request<T>("POST", path, body),
   put: <T>(path: string, body: unknown) => request<T>("PUT", path, body),
-  del: (path: string) => request<void>("DELETE", path),
+  del: <T = void>(path: string) => request<T>("DELETE", path),
 };
 
 // --- resources, mirroring internal/api/admin.go ---
@@ -429,6 +429,20 @@ export type CatalogModel = {
 export type ImportModelsResult = {
   imported: ModelAlias[];
   skipped: string[];
+};
+
+/** Response cache stats, served by /cache. */
+export type CacheStats = {
+  entries: number;
+  capacity: number;
+  hits: number;
+  misses: number;
+  stores: number;
+  evictions: number;
+  enabled: boolean;
+  /** Entry lifetime as a Go duration string, "0s" when the cache is off. */
+  ttl: string;
+  hit_rate: number;
 };
 
 export type Settings = Record<string, string>;

@@ -411,6 +411,24 @@ v1.1: quotas cap how much a key spends, the allowlist caps what it can reach.
 
 ---
 
+## v1.6 — Cache Panel ✅
+
+The cache admin endpoints shipped in v1.5, but the hit rate was only visible
+over HTTP or Prometheus. This puts it in the dashboard.
+
+- [x] `apps/dashboard/src/app/cache/page.tsx` — hit rate, occupancy against
+      capacity, TTL, and the hit/miss/store/eviction counters, polled every 5s
+- [x] Purge button, disabled while the cache is empty, reporting how many
+      entries were dropped
+- [x] Disabled cache renders the `config.yaml` keys that enable it instead of
+      a wall of zeroes
+- [x] `CacheStats` type in `lib/api.ts` mirroring `cacheStatsResponse`;
+      `api.del` is generic so the purge count can be read
+- [x] Nav entry between Keys and Settings
+- [x] `next build` and `eslint` clean
+
+---
+
 ## Open Decisions
 
 | # | Decision | Options | Status |
@@ -425,15 +443,12 @@ v1.1: quotas cap how much a key spends, the allowlist caps what it can reach.
 
 ## Next Action
 
-**v1.5 is feature-complete.** A replayed prompt is now served from memory
-instead of an upstream. Suite is green under `-race` and the repo is
-lint-clean.
+**v1.6 is feature-complete.** Cache effectiveness is now visible and
+purgeable from the dashboard.
 
 Candidates for the next cycle, in the order they are recommended:
 - Per-provider budgets and alerts — the usage log and pricing table already
   hold everything needed to cap spend per provider or alias and notify on a
   threshold.
-- A cache panel on the dashboard — the admin endpoints are there, but the
-  hit rate is only visible over HTTP or Prometheus.
 - A real subcommand parser, the last unchecked v0.6 item, now that the CLI has
   grown past the flag handling it was written for.

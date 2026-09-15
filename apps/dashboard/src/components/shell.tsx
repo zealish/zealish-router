@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import {
   Activity,
+  Database,
   KeyRound,
   LayoutDashboard,
   Layers,
@@ -29,6 +30,7 @@ const NAV = [
   { href: "/combos", label: "Combos", icon: Layers },
   { href: "/proxies", label: "Proxy Pool", icon: Network },
   { href: "/keys", label: "Endpoint & Keys", icon: KeyRound },
+  { href: "/cache", label: "Response Cache", icon: Database },
   { href: "/settings", label: "Settings", icon: Settings },
 ];
 
