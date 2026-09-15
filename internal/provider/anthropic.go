@@ -47,14 +47,16 @@ func isBearerToken(key string) bool {
 // --- wire types ---
 
 type anthropicRequest struct {
-	Model       string             `json:"model"`
-	Messages    []anthropicMessage `json:"messages"`
-	System      string             `json:"system,omitempty"`
-	MaxTokens   int                `json:"max_tokens"`
-	Stream      bool               `json:"stream,omitempty"`
-	Temperature *float64           `json:"temperature,omitempty"`
-	TopP        *float64           `json:"top_p,omitempty"`
-	StopSeqs    []string           `json:"stop_sequences,omitempty"`
+	Model       string               `json:"model"`
+	Messages    []anthropicMessage   `json:"messages"`
+	System      string               `json:"system,omitempty"`
+	MaxTokens   int                  `json:"max_tokens"`
+	Stream      bool                 `json:"stream,omitempty"`
+	Temperature *float64             `json:"temperature,omitempty"`
+	TopP        *float64             `json:"top_p,omitempty"`
+	StopSeqs    []string             `json:"stop_sequences,omitempty"`
+	Tools       []anthropicTool      `json:"tools,omitempty"`
+	ToolChoice  *anthropicToolChoice `json:"tool_choice,omitempty"`
 }
 
 type anthropicMessage struct {
@@ -72,7 +74,12 @@ type anthropicResponse struct {
 
 type anthropicContent struct {
 	Type string `json:"type"`
-	Text string `json:"text"`
+	Text string `json:"text,omitempty"`
+
+	// Tool-use blocks carry the call the model wants made.
+	ID    string          `json:"id,omitempty"`
+	Name  string          `json:"name,omitempty"`
+	Input json.RawMessage `json:"input,omitempty"`
 }
 
 type anthropicUsage struct {
@@ -85,12 +92,15 @@ type anthropicUsage struct {
 // anthropicEvent is one decoded SSE payload of a streaming response.
 type anthropicEvent struct {
 	Type  string `json:"type"`
+	Index int    `json:"index"`
 	Delta *struct {
-		Type       string `json:"type"`
-		Text       string `json:"text"`
-		StopReason string `json:"stop_reason"`
+		Type        string `json:"type"`
+		Text        string `json:"text"`
+		PartialJSON string `json:"partial_json"`
+		StopReason  string `json:"stop_reason"`
 	} `json:"delta"`
-	Message *struct {
+	ContentBlock *anthropicContent `json:"content_block"`
+	Message      *struct {
 		ID    string          `json:"id"`
 		Model string          `json:"model"`
 		Usage *anthropicUsage `json:"usage"`
@@ -116,19 +126,35 @@ func toAnthropic(req *openai.ChatCompletionRequest, stream bool) *anthropicReque
 		out.MaxTokens = *req.MaxTokens
 	}
 
+	if raw, ok := req.Extra["tools"]; ok {
+		out.Tools = toAnthropicTools(raw)
+	}
+	if raw, ok := req.Extra["tool_choice"]; ok && len(out.Tools) > 0 {
+		out.ToolChoice = toAnthropicToolChoice(raw)
+	}
+
 	var system []string
 	for _, m := range req.Messages {
-		if m.Role == "system" || m.Role == "developer" {
+		switch m.Role {
+		case "system", "developer":
 			if text, ok := m.Text(); ok {
 				system = append(system, text)
 			}
-			continue
+		case "tool", "function":
+			if msg, ok := toAnthropicToolResult(m); ok {
+				out.Messages = append(out.Messages, msg)
+			}
+		case "assistant":
+			out.Messages = append(out.Messages, anthropicMessage{
+				Role:    "assistant",
+				Content: toAnthropicAssistant(m),
+			})
+		default:
+			out.Messages = append(out.Messages, anthropicMessage{
+				Role:    m.Role,
+				Content: toAnthropicContent(m.Content),
+			})
 		}
-		content := m.Content
-		if len(content) == 0 {
-			content = json.RawMessage(`""`)
-		}
-		out.Messages = append(out.Messages, anthropicMessage{Role: m.Role, Content: content})
 	}
 	out.System = strings.Join(system, "\n\n")
 	return out
@@ -145,13 +171,18 @@ func fromAnthropic(resp *anthropicResponse) *openai.ChatCompletionResponse {
 	content, _ := json.Marshal(text.String())
 	reason := finishReason(resp.StopReason)
 
+	msg := &openai.Message{Role: "assistant", Content: content}
+	if calls := toolCallsFrom(resp.Content); calls != nil {
+		msg.Extra = map[string]json.RawMessage{"tool_calls": calls}
+	}
+
 	return &openai.ChatCompletionResponse{
 		ID:     resp.ID,
 		Object: "chat.completion",
 		Model:  resp.Model,
 		Choices: []openai.Choice{{
 			Index:        0,
-			Message:      &openai.Message{Role: "assistant", Content: content},
+			Message:      msg,
 			FinishReason: &reason,
 		}},
 		Usage: fromAnthropicUsage(resp.Usage),
@@ -258,6 +289,7 @@ func pumpAnthropic(ctx context.Context, body io.Reader, model string, out chan<-
 	var (
 		id    string
 		usage = &anthropicUsage{}
+		tools = newToolCallStream()
 	)
 
 	emit := func(chunk openai.StreamChunk) bool {
@@ -287,8 +319,33 @@ func pumpAnthropic(ctx context.Context, body io.Reader, model string, out chan<-
 				}
 				mergeAnthropicUsage(usage, ev.Message.Usage)
 			}
+		case "content_block_start":
+			if ev.ContentBlock == nil || ev.ContentBlock.Type != "tool_use" {
+				return true
+			}
+			calls := tools.start(ev.Index, ev.ContentBlock.ID, ev.ContentBlock.Name)
+			return emit(openai.StreamChunk{Choices: []openai.Choice{{
+				Index: 0,
+				Delta: &openai.Message{
+					Role:  "assistant",
+					Extra: map[string]json.RawMessage{"tool_calls": calls},
+				},
+			}}})
 		case "content_block_delta":
-			if ev.Delta == nil || ev.Delta.Text == "" {
+			if ev.Delta == nil {
+				return true
+			}
+			if ev.Delta.Type == "input_json_delta" {
+				calls := tools.delta(ev.Index, ev.Delta.PartialJSON)
+				if calls == nil {
+					return true
+				}
+				return emit(openai.StreamChunk{Choices: []openai.Choice{{
+					Index: 0,
+					Delta: &openai.Message{Extra: map[string]json.RawMessage{"tool_calls": calls}},
+				}}})
+			}
+			if ev.Delta.Text == "" {
 				return true
 			}
 			text, _ := json.Marshal(ev.Delta.Text)

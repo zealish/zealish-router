@@ -17,6 +17,8 @@ License: Apache-2.0 · Platform: Linux, Docker
 - OpenAI-compatible `POST /v1/chat/completions`, `POST /v1/embeddings` and `GET /v1/models`
 - Two wire dialects — OpenAI and Anthropic — plus a preset catalogue for known
   upstreams (OpenAI, OpenRouter, Groq, Ollama, …); any compatible endpoint works
+- Tool calling and image input translated across both dialects, streaming
+  included, so an agent keeps working when it falls back to another provider
 - Model aliases with a deterministic fallback chain
 - Combos: one virtual model name backed by a pool of aliases, `fallback` or
   `round_robin`
@@ -330,6 +332,38 @@ Combos are addressable wherever a model is: `"model": "code-agent"` on
 shadows a real alias of the same name, members must be existing aliases, and
 deleting a provider strips its aliases from every pool — a combo left without
 members is dropped rather than routing into thin air.
+
+---
+
+## Tool calling and images
+
+Clients always speak OpenAI, whatever dialect answers upstream.
+For an OpenAI-compatible upstream the request is passed through untouched. For
+an Anthropic upstream the gateway translates both directions, so the same
+request works against either and a fallback between them is invisible to the
+client.
+
+| OpenAI | Anthropic |
+|---|---|
+| `tools[].function` | `tools[]` with `input_schema` |
+| `tool_choice: auto` / `none` / `required` | `tool_choice.type` `auto` / `none` / `any` |
+| `tool_choice: {"function":{"name":…}}` | `tool_choice: {"type":"tool","name":…}` |
+| assistant `tool_calls` | `tool_use` content blocks |
+| `role: "tool"` + `tool_call_id` | user message with a `tool_result` block |
+| `image_url` part, `data:` URL | `image` block, `base64` source |
+| `image_url` part, remote URL | `image` block, `url` source |
+
+Tool arguments survive the round trip in both forms: the JSON string an OpenAI
+client sends becomes the `input` object Anthropic expects, and the object that
+comes back is rendered as a JSON string again. Streaming works the same way —
+`tool_use` blocks arrive as indexed `delta.tool_calls` fragments a client can
+concatenate — and `stop_reason: tool_use` surfaces as `finish_reason:
+"tool_calls"`.
+
+Tool types Anthropic declares differently (`web_search_preview` and the other
+server-side tools) are dropped rather than forwarded, since the upstream would
+reject them. A `tool` message without a `tool_call_id` is dropped for the same
+reason.
 
 ---
 

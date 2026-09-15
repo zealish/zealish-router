@@ -274,6 +274,50 @@ Legend: `[x]` done · `[ ]` pending · `~` partial (scaffold only, no logic)
 
 ---
 
+## v1.3 — Tool Calling & Multimodal Across Dialects ✅
+
+The OpenAI dialect passes `tools`, `tool_calls` and array-of-parts content
+through untouched via `Extra`; only the Anthropic dialect had to learn them, so
+the work lands in `internal/provider/anthropic_tools.go`.
+
+### Request translation
+- [x] `tools[].function` → Anthropic `tools[]` with `input_schema`; a tool
+      without `parameters` gets an empty object schema, which Anthropic requires
+      and OpenAI treats as optional
+- [x] Non-function tool types (`web_search_preview`, …) are dropped rather than
+      forwarded into a rejection
+- [x] `tool_choice` string and object forms → `auto`/`none`/`any`/`tool`; only
+      sent when a tools array survived translation
+- [x] Assistant `tool_calls` → `tool_use` content blocks, the JSON-string
+      `arguments` parsed back into the `input` object
+- [x] `role: "tool"` + `tool_call_id` → user message with a `tool_result`
+      block; a tool message without an id is dropped
+- [x] Array-of-parts content → typed blocks; `image_url` with a `data:` URL
+      becomes a `base64` source, a remote URL becomes a `url` source
+- [x] String content stays a string, so plain conversations keep the compact
+      wire form
+
+### Response translation
+- [x] `tool_use` blocks → `tool_calls` on the assistant message, `input`
+      rendered back as the JSON string OpenAI clients parse
+- [x] Streaming: `content_block_start` emits the opening delta with id and
+      name, `input_json_delta` emits argument fragments, both indexed per
+      content block so a client can concatenate them
+- [x] `stop_reason: tool_use` already mapped to `finish_reason: "tool_calls"`
+
+### Tests
+- [x] Tools: function tools converted, non-function dropped, missing
+      parameters defaulted, `tool_choice` across every form, choice suppressed
+      without tools
+- [x] Conversation: assistant call plus tool result round-trip, orphan tool
+      message dropped
+- [x] Multimodal: data URL and remote URL sources, string content preserved
+- [x] Response: `tool_calls` present on the decoded *and* serialised message
+- [x] Streaming: id, name and argument fragments reassemble into the original
+      arguments object
+
+---
+
 ## Open Decisions
 
 | # | Decision | Options | Status |
@@ -288,19 +332,17 @@ Legend: `[x]` done · `[ ]` pending · `~` partial (scaffold only, no logic)
 
 ## Next Action
 
-**v1.2 is feature-complete.** `POST /v1/embeddings` closes the last commonly
-needed OpenAI endpoint: it shares the alias table, fallback chain, retry policy,
-circuit breaker, quotas and cost accounting with chat completions, and rejects
-the Anthropic dialect up front. Suite is green under `-race`. Remaining: tag
-`v1.0.0`, then `v1.1.0` and `v1.2.0`.
+**v1.3 is feature-complete.** Tool calling and image input now translate in
+both directions between the OpenAI and Anthropic dialects, streaming included,
+so an agent that falls back from one to the other keeps its tools. Suite is
+green under `-race` and the provider package is lint-clean.
 
 Candidates for the next cycle, in the order they are recommended:
-- Provider load balancing — the chain is strictly primary-then-fallback, so two
-  equivalent providers cannot share traffic. Weighted or round-robin selection
-  on an alias would turn multiple keys or upstreams into capacity, not just
-  failover. The combo pool already has cursors to build on.
-- Request log viewer — `usage_events` records the outcome but not the route
-  taken. Surfacing per-request attempts, the provider that answered and the
-  latency would make fallback debuggable without reading slog.
 - Per-key model allowlist — a key can currently reach every alias. Restricting
   which models a key may address complements the quotas shipped in v1.1.
+- Response cache — an exact-match cache keyed on model and request body would
+  cut spend for agents that replay the same prompt, with streaming bypassed and
+  a TTL bounding staleness.
+- Per-provider budgets and alerts — the usage log and pricing table already
+  hold everything needed to cap spend per provider or alias and notify on a
+  threshold.
