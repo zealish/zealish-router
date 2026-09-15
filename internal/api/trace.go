@@ -22,6 +22,7 @@ type requestTraceResponse struct {
 	CreatedAt     string  `json:"created_at"`
 	KeyID         string  `json:"api_key"`
 	Model         string  `json:"model"`
+	Dialect       string  `json:"dialect"`
 	Streamed      bool    `json:"streamed"`
 	TotalLatency  int64   `json:"total_latency_ms"`
 	TotalTokens   int     `json:"total_tokens"`
@@ -65,6 +66,7 @@ func (h *adminHandler) listRequests(w http.ResponseWriter, r *http.Request) {
 		Status:   q.Get("status"),
 		Model:    q.Get("model"),
 		Provider: q.Get("provider"),
+		Dialect:  q.Get("dialect"),
 		KeyID:    q.Get("api_key"),
 		Limit:    queryInt(q.Get("limit"), defaultTraceLimit, maxTraceLimit),
 		Offset:   queryInt(q.Get("offset"), 0, 0),
@@ -121,6 +123,7 @@ func toTraceResponse(t storage.RequestTrace) requestTraceResponse {
 		CreatedAt:     t.CreatedAt.Format(time.RFC3339),
 		KeyID:         t.KeyID,
 		Model:         t.Model,
+		Dialect:       t.Dialect,
 		Streamed:      t.Streamed,
 		TotalLatency:  t.TotalLatency.Milliseconds(),
 		TotalTokens:   t.TotalTokens,

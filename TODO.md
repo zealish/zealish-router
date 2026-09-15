@@ -135,7 +135,6 @@ Legend: `[x]` done · `[ ]` pending · `~` partial (scaffold only, no logic)
 - [x] `zealish-router keys create --name <name>` — prints the raw key once
 - [x] `zealish-router keys list` / `keys revoke <id>`
 - [x] `zealish-router models` — print alias → provider/model/fallback table
-- [ ] Move to a real subcommand parser if flag handling gets unwieldy
 
 ### Tests
 - [x] Watcher: valid reload delivered, invalid rejected then recovers on next good write
@@ -429,6 +428,127 @@ over HTTP or Prometheus. This puts it in the dashboard.
 
 ---
 
+## v1.7 — Anthropic Ingress ✅
+
+The Anthropic dialect was previously outbound only: the gateway could *call* an
+Anthropic upstream, but a client had to speak OpenAI. This opens the other
+edge, so Claude Code and the Anthropic SDKs reach the same aliases, fallback
+chain, quotas and usage log — and can be routed onto a non-Anthropic upstream.
+
+### Shared wire types
+- [x] `pkg/anthropic` — the Messages types lifted out of `internal/provider`,
+      which needed them for the outbound direction and now shares them with the
+      inbound one; `internal/provider/anthropic*.go` repointed onto it
+- [x] `Request.System` widened from `string` to `json.RawMessage` with
+      `SystemText`: the API accepts a plain string *and* an array of text
+      blocks, and a real client sends both
+- [x] `ContentBlock` grew the `tool_result` and `image` fields the outbound
+      direction had encoded as ad-hoc maps
+
+### Request translation (Anthropic → OpenAI)
+- [x] Top-level `system` becomes a leading system message
+- [x] `tool_use` blocks → assistant `tool_calls`, the `input` object rendered
+      back as the JSON-string `arguments` OpenAI clients parse
+- [x] `tool_result` blocks → their own `role: "tool"` messages carrying
+      `tool_call_id`; a turn holding several results expands into several
+      messages, which is how that dialect models them
+- [x] `image` blocks → `image_url` parts; a `base64` source becomes a data URL,
+      a `url` source passes through
+- [x] `tools[]`/`tool_choice` → the OpenAI nesting; Anthropic's `any` is
+      OpenAI's `required`
+- [x] A text-only turn keeps the compact string form, so a plain conversation
+      does not grow an array of parts
+
+### Response translation (OpenAI → Anthropic)
+- [x] Assistant text and `tool_calls` → a `message` envelope with `text` and
+      `tool_use` content blocks
+- [x] `finish_reason` → `stop_reason`, the inverse of the existing mapping
+- [x] Usage: cached and cache-written prompt tokens are reported on their own
+      Anthropic fields and subtracted from `input_tokens`, so a cached prompt
+      is not billed twice
+
+### Streaming
+- [x] `stream.Writer.NamedEvent` — the Anthropic dialect names every frame,
+      which the OpenAI one never needed
+- [x] `messageStream` reframes uniform OpenAI chunks into the bracketed event
+      sequence: `message_start` → (`content_block_start` →
+      `content_block_delta*` → `content_block_stop`)* → `message_delta` →
+      `message_stop`, with no `[DONE]` sentinel
+- [x] Text and tool calls never share a content block; a switch between them
+      closes the open block and advances the index
+- [x] Tool arguments stream as `input_json_delta` fragments, indexed per block
+      so a client can concatenate them
+- [x] Keepalives are `ping` events rather than comment frames
+- [x] An upstream that closes without a chunk still produces a well-formed
+      message rather than an empty body
+
+### Transport
+- [x] `POST /v1/messages` behind the same body limit, auth, quota, allowlist
+      and trace middleware as `/v1/chat/completions`
+- [x] `max_tokens` required, unlike the OpenAI dialect which treats it as
+      optional
+- [x] Errors answer in the Anthropic envelope — `writeGatewayError` picks the
+      dialect by endpoint, so auth and quota middleware shared with `/v1` never
+      hand an Anthropic client an OpenAI error body
+- [x] Cached under its own endpoint label: the bodies are a different dialect,
+      so an identical prompt is not an identical request
+
+### Tests
+- [x] Handler: happy path, required fields, unknown alias, upstream 5xx as a
+      502 with no detail leak, all in the Anthropic envelope
+- [x] Translation: full tool cycle round-trips, images become data URLs, usage
+      is not double-counted
+- [x] Streaming: event sequence and ordering, no `[DONE]`, text deltas
+      reassemble, tool fragments reassemble into the original arguments, text
+      and tool calls occupy separate indexed blocks, usage on `message_delta`,
+      pre-frame failure is a status code, cache bypassed
+- [x] `stream`: named and unnamed frames; `pkg/anthropic`: `SystemText` across
+      every accepted shape
+
+---
+
+## v1.8 — Dialect Visibility ✅
+
+v1.7 shipped the Anthropic endpoint but left the dashboard unable to tell the
+two client populations apart: both dialects resolve the same aliases, so a
+trace looked identical whichever one produced it.
+
+### Storage
+- [x] Migration `0015_trace_dialect.sql` — `request_traces.dialect`, defaulting
+      to `openai`: every row predating the Anthropic endpoint was OpenAI
+      traffic, so the backfill is the default rather than a nullable column
+- [x] `storage.RequestTrace.Dialect` + `TraceFilter.Dialect` on SQLite and
+      memory; `dialectOrDefault` keeps the column non-empty whichever store
+      wrote it
+- [x] `storage.DialectOpenAI` / `DialectAnthropic` — the dialect is recorded,
+      never inferred from a request path
+
+### Request path
+- [x] `router.WithDialect` / `DialectFrom` carry it through the request
+      context, defaulting to OpenAI so only the Anthropic handler sets it
+- [x] The trace records it; routing never reads it, since both dialects
+      resolve the same aliases
+
+### Admin & dashboard
+- [x] `dialect` on every trace response and as a `GET /api/v1/requests` filter
+- [x] `REQUEST_DIALECTS` in `lib/api.ts` and a `DialectBadge` component
+- [x] Request Trace page: Dialect column and an all-dialects filter alongside
+      status, model and provider
+- [x] Request detail page: Client dialect field
+- [x] Metrics needed no new label — `router_requests_total` already separates
+      by the `path` label and the response cache by its `endpoint` label
+
+### Tests
+- [x] Storage: dialect round-trips, a trace recorded without one reads as
+      OpenAI, filtering isolates each population
+- [x] HTTP: a `/v1/messages` call and a `/v1/chat/completions` call produce one
+      trace each with the right dialect, and the admin filter returns only one
+- [x] Migration verified idempotent against the existing production database
+- [x] `next build`, `tsc` and `eslint` clean; verified in a browser against a
+      running router
+
+---
+
 ## Open Decisions
 
 | # | Decision | Options | Status |
@@ -438,17 +558,11 @@ over HTTP or Prometheus. This puts it in the dashboard.
 | 3 | Streaming fallback after first byte | commit vs inject error chunk | **resolved: commit** (v0.4) |
 | 4 | Rate limiting scope | v1.0 vs post-1.0 | **resolved: shipped in v1.1**, in-process, keyed on `api_keys` |
 | 5 | `Message.Content` representation | `json.RawMessage` vs typed union | **resolved: `json.RawMessage` + `Text()`** (v0.2) |
+| 6 | Anthropic ingress representation | reuse the OpenAI core vs a parallel pipeline | **resolved: reuse** (v1.7) — `/v1/messages` translates at the edge, so routing, quotas and usage stay single-sourced |
 
 ---
 
 ## Next Action
 
-**v1.6 is feature-complete.** Cache effectiveness is now visible and
-purgeable from the dashboard.
-
-Candidates for the next cycle, in the order they are recommended:
-- Per-provider budgets and alerts — the usage log and pricing table already
-  hold everything needed to cap spend per provider or alias and notify on a
-  threshold.
-- A real subcommand parser, the last unchecked v0.6 item, now that the CLI has
-  grown past the flag handling it was written for.
+**v1.8 is feature-complete.** Both edges speak either dialect, and the
+dashboard reports which one each client used. No further work is queued.

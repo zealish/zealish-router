@@ -182,6 +182,15 @@ export const REQUEST_STATUSES = [
 
 export type RequestStatus = (typeof REQUEST_STATUSES)[number];
 
+/**
+ * The wire dialect a client spoke. OpenAI covers /v1/chat/completions and
+ * /v1/embeddings; Anthropic covers /v1/messages. Both reach the same aliases,
+ * so the dialect describes the caller, not the route.
+ */
+export const REQUEST_DIALECTS = ["openai", "anthropic"] as const;
+
+export type RequestDialect = (typeof REQUEST_DIALECTS)[number];
+
 /** One upstream call inside a trace, served by /requests/:id. */
 export type RequestAttempt = {
   seq: number;
@@ -207,6 +216,7 @@ export type RequestTrace = {
   created_at: string;
   api_key: string;
   model: string;
+  dialect: RequestDialect;
   streamed: boolean;
   total_latency_ms: number;
   total_tokens: number;

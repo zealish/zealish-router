@@ -99,6 +99,7 @@ export default function RequestDetailPage() {
                 mono
               />
               <Field label="Mode" value={data.streamed ? "stream" : "unary"} />
+              <Field label="Client dialect" value={data.dialect} mono />
               <Field label="Attempts" value={String(data.attempt_count)} />
             </CardContent>
           </Card>
@@ -175,7 +176,9 @@ function AttemptRow({
       <div className="bg-muted relative h-2 w-full overflow-hidden rounded-full">
         <div
           className={
-            attempt.status === "ok" ? "bg-primary h-full" : "bg-destructive h-full"
+            attempt.status === "ok"
+              ? "bg-primary h-full"
+              : "bg-destructive h-full"
           }
           style={{ marginLeft: `${left}%`, width: `${width}%` }}
         />

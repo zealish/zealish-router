@@ -255,6 +255,13 @@ type UsageStore interface {
 	Prune(ctx context.Context, before time.Time) (int64, error)
 }
 
+// The wire dialects a client can speak. The gateway translates both onto one
+// internal shape, so the dialect is recorded rather than inferred from a path.
+const (
+	DialectOpenAI    = "openai"
+	DialectAnthropic = "anthropic"
+)
+
 // RequestTrace is the summary of one gateway request: a single row however
 // many providers the fallback chain walked. It holds routing metadata only —
 // never prompt or completion content.
@@ -266,7 +273,10 @@ type RequestTrace struct {
 	// Empty means unattributed, exactly as on UsageEvent.
 	KeyID string
 	// Model is the name the client asked for: an alias or a combo.
-	Model    string
+	Model string
+	// Dialect is the wire format the *client* spoke: "openai" or "anthropic".
+	// The upstream dialect is visible through each attempt's provider.
+	Dialect  string
 	Streamed bool
 	// TotalLatency covers the whole request, including retries and backoff.
 	TotalLatency time.Duration
@@ -318,6 +328,8 @@ type TraceFilter struct {
 	// one: a trace that fell back off a provider is still a trace about it.
 	Provider string
 	KeyID    string
+	// Dialect matches the client-side wire format exactly.
+	Dialect string
 	// Limit and Offset paginate the newest-first listing.
 	Limit  int
 	Offset int
@@ -999,6 +1011,7 @@ func (s *memoryTraces) Record(_ context.Context, t RequestTrace) error {
 	defer s.mu.Unlock()
 
 	t.AttemptCount = len(t.Attempts)
+	t.Dialect = dialectOrDefault(t.Dialect)
 	for i := range s.items {
 		if s.items[i].RequestID == t.RequestID {
 			s.items[i] = t
@@ -1048,6 +1061,9 @@ func traceMatches(t RequestTrace, f TraceFilter) bool {
 		return false
 	}
 	if f.Model != "" && t.Model != f.Model {
+		return false
+	}
+	if f.Dialect != "" && t.Dialect != f.Dialect {
 		return false
 	}
 	if f.KeyID != "" && t.KeyID != f.KeyID {

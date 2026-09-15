@@ -22,6 +22,9 @@ const maxTraceAttempts = 64
 // requestIDKey carries the gateway request id through the request context.
 type requestIDKey struct{}
 
+// dialectKey carries the client-side wire dialect through the request context.
+type dialectKey struct{}
+
 // WithRequestID attaches the gateway request id to a context. The HTTP layer
 // sets it once per request; everything downstream reads it.
 func WithRequestID(ctx context.Context, id string) context.Context {
@@ -31,7 +34,23 @@ func WithRequestID(ctx context.Context, id string) context.Context {
 // RequestIDFrom returns the gateway request id attached to a context, if any.
 func RequestIDFrom(ctx context.Context) (string, bool) {
 	id, ok := ctx.Value(requestIDKey{}).(string)
-	return id, ok && id != ""
+	return id, ok
+}
+
+// WithDialect attaches the dialect the client spoke. Routing never reads it —
+// both dialects resolve the same aliases — but the trace records it so the
+// dashboard can tell the two client populations apart.
+func WithDialect(ctx context.Context, dialect string) context.Context {
+	return context.WithValue(ctx, dialectKey{}, dialect)
+}
+
+// DialectFrom returns the dialect attached to a context, defaulting to OpenAI
+// for a caller that never set one.
+func DialectFrom(ctx context.Context) string {
+	if d, ok := ctx.Value(dialectKey{}).(string); ok && d != "" {
+		return d
+	}
+	return storage.DialectOpenAI
 }
 
 // trace accumulates the attempts of one gateway request. One request produces
@@ -45,6 +64,7 @@ type trace struct {
 	requestID string
 	keyID     string
 	model     string
+	dialect   string
 	streamed  bool
 	started   time.Time
 
@@ -72,6 +92,7 @@ func newTrace(ctx context.Context, model string, streamed bool, meta callMeta) *
 		requestID: id,
 		keyID:     meta.keyID,
 		model:     model,
+		dialect:   DialectFrom(ctx),
 		streamed:  streamed,
 		started:   meta.started,
 	}
@@ -156,6 +177,7 @@ func (e *Engine) finishTrace(t *trace, status string) {
 		CreatedAt:     t.started.UTC(),
 		KeyID:         t.keyID,
 		Model:         t.model,
+		Dialect:       t.dialect,
 		Streamed:      t.streamed,
 		TotalLatency:  time.Since(t.started),
 		TotalTokens:   t.tokens,

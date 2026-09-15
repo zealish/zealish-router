@@ -24,6 +24,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
+  REQUEST_DIALECTS,
   REQUEST_STATUSES,
   type ModelAlias,
   type Provider,
@@ -31,6 +32,7 @@ import {
 } from "@/lib/api";
 import { useResource } from "@/lib/use-resource";
 import {
+  DialectBadge,
   formatCost,
   formatLatency,
   StatusBadge,
@@ -44,6 +46,7 @@ type Filters = {
   status: string;
   model: string;
   provider: string;
+  dialect: string;
   api_key: string;
 };
 
@@ -51,6 +54,7 @@ const NO_FILTERS: Filters = {
   status: "",
   model: "",
   provider: "",
+  dialect: "",
   api_key: "",
 };
 
@@ -158,6 +162,23 @@ export default function RequestsPage() {
           </SelectContent>
         </Select>
 
+        <Select
+          value={filters.dialect || "__all"}
+          onValueChange={(v) => setFilter("dialect", v === "__all" ? "" : v)}
+        >
+          <SelectTrigger size="sm" className="w-40">
+            <SelectValue placeholder="Dialect" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="__all">All dialects</SelectItem>
+            {REQUEST_DIALECTS.map((dialect) => (
+              <SelectItem key={dialect} value={dialect}>
+                {dialect}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+
         <form
           className="relative w-full sm:w-56"
           onSubmit={(e) => {
@@ -196,6 +217,7 @@ export default function RequestsPage() {
               <TableHead>Time</TableHead>
               <TableHead>Request</TableHead>
               <TableHead>Model</TableHead>
+              <TableHead>Dialect</TableHead>
               <TableHead>Provider</TableHead>
               <TableHead>Status</TableHead>
               <TableHead className="text-right">Attempts</TableHead>
@@ -208,7 +230,7 @@ export default function RequestsPage() {
             {loading && items.length === 0 ? (
               Array.from({ length: 5 }).map((_, i) => (
                 <TableRow key={i}>
-                  <TableCell colSpan={9}>
+                  <TableCell colSpan={10}>
                     <Skeleton className="h-5 w-full" />
                   </TableCell>
                 </TableRow>
@@ -216,7 +238,7 @@ export default function RequestsPage() {
             ) : items.length === 0 ? (
               <TableRow>
                 <TableCell
-                  colSpan={9}
+                  colSpan={10}
                   className="text-muted-foreground h-24 text-center"
                 >
                   {filtered
@@ -248,6 +270,9 @@ export default function RequestsPage() {
                     {trace.streamed ? (
                       <span className="text-muted-foreground ml-2">stream</span>
                     ) : null}
+                  </TableCell>
+                  <TableCell>
+                    <DialectBadge dialect={trace.dialect} />
                   </TableCell>
                   <TableCell className="font-mono text-xs">
                     {trace.final_provider || "—"}

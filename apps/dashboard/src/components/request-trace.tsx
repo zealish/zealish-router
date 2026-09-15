@@ -32,6 +32,19 @@ export function StatusBadge({ status }: { status: string }) {
   );
 }
 
+/**
+ * Which dialect the caller spoke. Both reach the same aliases, so this is a
+ * quiet outline badge rather than anything that reads as a status.
+ */
+export function DialectBadge({ dialect }: { dialect: string }) {
+  if (!dialect) return <span className="text-muted-foreground">—</span>;
+  return (
+    <Badge variant="outline" className="font-mono">
+      {dialect}
+    </Badge>
+  );
+}
+
 /** Latencies read in ms until they pass a second. */
 export function formatLatency(ms: number): string {
   if (ms <= 0) return "—";

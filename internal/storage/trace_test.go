@@ -87,6 +87,57 @@ func TestTraceRecordRoundTrips(t *testing.T) {
 	}
 }
 
+// The dialect round-trips, and a trace recorded without one reads as OpenAI:
+// rows predating the Anthropic endpoint were all OpenAI traffic.
+func TestTraceDialect(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	tagged := sampleTrace("req-anthropic", now, "gpt-5", "openai", "ok")
+	tagged.Dialect = DialectAnthropic
+	if err := store.Traces().Record(ctx, tagged); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	// sampleTrace leaves Dialect empty, which is the pre-migration shape.
+	if err := store.Traces().Record(ctx, sampleTrace("req-legacy", now, "gpt-5", "openai", "ok")); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	got, err := store.Traces().Get(ctx, "req-anthropic")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Dialect != DialectAnthropic {
+		t.Errorf("Dialect = %q, want %q", got.Dialect, DialectAnthropic)
+	}
+
+	legacy, err := store.Traces().Get(ctx, "req-legacy")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if legacy.Dialect != DialectOpenAI {
+		t.Errorf("Dialect = %q, want it to default to %q", legacy.Dialect, DialectOpenAI)
+	}
+
+	// Filtering picks one population without touching the other.
+	for _, tc := range []struct {
+		dialect string
+		want    string
+	}{
+		{DialectAnthropic, "req-anthropic"},
+		{DialectOpenAI, "req-legacy"},
+	} {
+		list, total, err := store.Traces().List(ctx, TraceFilter{Dialect: tc.dialect})
+		if err != nil {
+			t.Fatalf("List(%s): %v", tc.dialect, err)
+		}
+		if total != 1 || len(list) != 1 || list[0].RequestID != tc.want {
+			t.Errorf("List(%s) = %d rows %+v, want only %s", tc.dialect, total, list, tc.want)
+		}
+	}
+}
+
 // Re-recording the same id replaces the trace instead of duplicating it, so a
 // retried write after a partial failure converges.
 func TestTraceRecordReplacesSameRequestID(t *testing.T) {

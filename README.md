@@ -15,6 +15,8 @@ License: Apache-2.0 · Platform: Linux, Docker
 ## Features
 
 - OpenAI-compatible `POST /v1/chat/completions`, `POST /v1/embeddings` and `GET /v1/models`
+- Anthropic-compatible `POST /v1/messages`, so Claude Code and the Anthropic
+  SDKs reach the same aliases, fallback chain and budget as an OpenAI client
 - Two wire dialects — OpenAI and Anthropic — plus a preset catalogue for known
   upstreams (OpenAI, OpenRouter, Groq, Ollama, …); any compatible endpoint works
 - Tool calling and image input translated across both dialects, streaming
@@ -142,6 +144,22 @@ client = OpenAI(base_url="http://localhost:8787/v1", api_key="zr_…")
 client.chat.completions.create(model="gpt-4o", messages=[{"role": "user", "content": "hi"}])
 ```
 
+An Anthropic client reaches the same aliases through `/v1/messages`, which
+speaks that dialect end to end — `max_tokens` is required, the response is a
+`message` envelope, and a stream is the named event sequence those clients
+expect rather than `data: [DONE]`:
+
+```python
+from anthropic import Anthropic
+
+client = Anthropic(base_url="http://localhost:8787", api_key="zr_…")
+client.messages.create(model="gpt-4o", max_tokens=1024,
+                       messages=[{"role": "user", "content": "hi"}])
+```
+
+The model name is still a gateway alias, so an Anthropic SDK can be pointed at
+an OpenAI, Groq or Ollama upstream and falls back across them unchanged.
+
 ---
 
 ## Configuration
@@ -222,6 +240,7 @@ version                      print the build version
 |---|---|---|
 | `POST` | `/v1/chat/completions` | OpenAI chat completions, streaming and non-streaming |
 | `POST` | `/v1/embeddings` | OpenAI embeddings; same aliases, fallback and cost accounting |
+| `POST` | `/v1/messages` | Anthropic messages, streaming and non-streaming |
 | `GET` | `/v1/models` | Configured aliases and combos |
 
 ### Operations (no auth)
@@ -249,6 +268,7 @@ version                      print the build version
 | `POST` | `/api/v1/models/{alias}/test` | Fire a minimal completion through an alias |
 | `GET` `PUT` `DELETE` | `/api/v1/combos[/{name}]` | Combos: virtual models backed by a pool of aliases |
 | `GET` `PUT` `POST` `DELETE` | `/api/v1/proxies[/{name}]`, `…/import` | Outbound proxy pool |
+| `GET` | `/api/v1/requests[/{request_id}]` | Request traces, newest first; filters `status`, `model`, `provider`, `dialect`, `api_key`, paged with `limit`/`offset`. The detail route adds the attempt timeline |
 | `GET` `DELETE` | `/api/v1/cache` | Response cache stats; `DELETE` purges every entry |
 | `GET` `PUT` | `/api/v1/settings` | Key/value settings |
 
@@ -259,10 +279,11 @@ Every mutation republishes the routing table in place — no restart needed.
 ## Dashboard
 
 A separate Next.js app in `apps/dashboard` — Overview, Models, Providers,
-Combos, Proxies, API Keys and Settings — talking only to `/api/v1`. No model
-traffic passes through it. The Overview page charts lifetime totals, cost and
-token series from the usage log, the most recently used models, and the latest
-requests.
+Combos, Proxies, Request Trace, API Keys, Cache and Settings — talking only to
+`/api/v1`. No model traffic passes through it. The Overview page charts
+lifetime totals, cost and token series from the usage log, the most recently
+used models, and the latest requests. The Request Trace page lists every
+request with the dialect its client spoke, filterable to one dialect at a time.
 
 ```sh
 cd apps/dashboard
@@ -346,13 +367,22 @@ members is dropped rather than routing into thin air.
 
 ---
 
-## Tool calling and images
+## Dialects
 
-Clients always speak OpenAI, whatever dialect answers upstream.
-For an OpenAI-compatible upstream the request is passed through untouched. For
-an Anthropic upstream the gateway translates both directions, so the same
-request works against either and a fallback between them is invisible to the
-client.
+The router speaks the OpenAI shape internally and translates at both edges, so
+either dialect can appear on either side:
+
+| Client | Upstream | What happens |
+|---|---|---|
+| OpenAI | OpenAI | passed through untouched |
+| OpenAI | Anthropic | translated on the way out and back |
+| Anthropic | OpenAI | translated on the way in and back |
+| Anthropic | Anthropic | translated twice; semantics preserved, not bytes |
+
+A fallback that crosses dialects is therefore invisible: an agent that starts
+on Claude and lands on a local Ollama model keeps its tools and images.
+
+The mapping is symmetric in both directions:
 
 | OpenAI | Anthropic |
 |---|---|
@@ -363,18 +393,36 @@ client.
 | `role: "tool"` + `tool_call_id` | user message with a `tool_result` block |
 | `image_url` part, `data:` URL | `image` block, `base64` source |
 | `image_url` part, remote URL | `image` block, `url` source |
+| system message | top-level `system` |
+| `finish_reason: length` / `tool_calls` / `stop` | `stop_reason: max_tokens` / `tool_use` / `end_turn` |
 
 Tool arguments survive the round trip in both forms: the JSON string an OpenAI
 client sends becomes the `input` object Anthropic expects, and the object that
-comes back is rendered as a JSON string again. Streaming works the same way —
-`tool_use` blocks arrive as indexed `delta.tool_calls` fragments a client can
-concatenate — and `stop_reason: tool_use` surfaces as `finish_reason:
-"tool_calls"`.
+comes back is rendered as a JSON string again.
+
+Streaming is reframed rather than relayed, since the two dialects bracket a
+message differently. An OpenAI client gets uniform chunks ending in
+`data: [DONE]`; an Anthropic client gets the named event sequence
+`message_start` → `content_block_start` → `content_block_delta*` →
+`content_block_stop` → `message_delta` → `message_stop`, with tool arguments as
+`input_json_delta` fragments and keepalives as `ping` events. Text and tool
+calls never share a content block, so block indices stay well-formed.
+
+Token usage is reconciled too: Anthropic reports cached and cache-written
+prompt tokens on their own fields, OpenAI folds them into `prompt_tokens`, so
+the translation adds or subtracts them rather than counting them twice.
 
 Tool types Anthropic declares differently (`web_search_preview` and the other
 server-side tools) are dropped rather than forwarded, since the upstream would
 reject them. A `tool` message without a `tool_call_id` is dropped for the same
-reason.
+reason. Embeddings have no Anthropic equivalent, so an alias pointing at that
+dialect rejects `/v1/embeddings` with a 400.
+
+Every request trace records which dialect its client spoke, so the dashboard's
+Request Trace page and `GET /api/v1/requests?dialect=…` can separate the two
+populations. Traces written before the Anthropic endpoint existed read as
+`openai`. Prometheus already separates them by the `path` label on
+`router_requests_total` and the `endpoint` label on `router_cache_events_total`.
 
 ---
 

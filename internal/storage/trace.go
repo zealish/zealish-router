@@ -18,7 +18,7 @@ type sqliteTraces struct {
 	db *sql.DB
 }
 
-const traceColumns = `request_id, created_at, key_id, model, streamed, total_latency_ms,
+const traceColumns = `request_id, created_at, key_id, model, dialect, streamed, total_latency_ms,
 	total_tokens, total_cost_usd, final_provider, final_alias, final_status, attempts`
 
 const attemptColumns = `seq, started_at, alias, provider, model, latency_ms, status,
@@ -36,13 +36,14 @@ func (s *sqliteTraces) Record(ctx context.Context, t RequestTrace) error {
 
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO request_traces
-		   (request_id, created_at, key_id, model, streamed, total_latency_ms,
+		   (request_id, created_at, key_id, model, dialect, streamed, total_latency_ms,
 		    total_tokens, total_cost_usd, final_provider, final_alias, final_status, attempts)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT (request_id) DO UPDATE SET
 		   created_at = excluded.created_at,
 		   key_id = excluded.key_id,
 		   model = excluded.model,
+		   dialect = excluded.dialect,
 		   streamed = excluded.streamed,
 		   total_latency_ms = excluded.total_latency_ms,
 		   total_tokens = excluded.total_tokens,
@@ -51,8 +52,8 @@ func (s *sqliteTraces) Record(ctx context.Context, t RequestTrace) error {
 		   final_alias = excluded.final_alias,
 		   final_status = excluded.final_status,
 		   attempts = excluded.attempts`,
-		t.RequestID, t.CreatedAt.Unix(), t.KeyID, t.Model, t.Streamed,
-		t.TotalLatency.Milliseconds(), t.TotalTokens, t.TotalCostUSD,
+		t.RequestID, t.CreatedAt.Unix(), t.KeyID, t.Model, dialectOrDefault(t.Dialect),
+		t.Streamed, t.TotalLatency.Milliseconds(), t.TotalTokens, t.TotalCostUSD,
 		t.FinalProvider, t.FinalAlias, t.FinalStatus, len(t.Attempts)); err != nil {
 		return fmt.Errorf("storage: record trace: %w", err)
 	}
@@ -134,6 +135,10 @@ func traceWhere(f TraceFilter) (string, []any) {
 	if f.Model != "" {
 		clauses = append(clauses, "model = ?")
 		args = append(args, f.Model)
+	}
+	if f.Dialect != "" {
+		clauses = append(clauses, "dialect = ?")
+		args = append(args, f.Dialect)
 	}
 	if f.KeyID != "" {
 		clauses = append(clauses, "key_id = ?")
@@ -223,8 +228,8 @@ func scanTrace(src scanner) (RequestTrace, error) {
 		createdAt int64
 		latencyMS int64
 	)
-	if err := src.Scan(&t.RequestID, &createdAt, &t.KeyID, &t.Model, &t.Streamed,
-		&latencyMS, &t.TotalTokens, &t.TotalCostUSD, &t.FinalProvider,
+	if err := src.Scan(&t.RequestID, &createdAt, &t.KeyID, &t.Model, &t.Dialect,
+		&t.Streamed, &latencyMS, &t.TotalTokens, &t.TotalCostUSD, &t.FinalProvider,
 		&t.FinalAlias, &t.FinalStatus, &t.AttemptCount); err != nil {
 		return RequestTrace{}, err
 	}
@@ -238,4 +243,13 @@ func truncateError(msg string) string {
 		return msg
 	}
 	return msg[:maxTraceError]
+}
+
+// dialectOrDefault keeps the column non-empty. A trace recorded without a
+// dialect predates the Anthropic endpoint, so OpenAI is the honest default.
+func dialectOrDefault(d string) string {
+	if d == "" {
+		return DialectOpenAI
+	}
+	return d
 }

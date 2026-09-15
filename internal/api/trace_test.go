@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/zealish/zealish-router/internal/provider"
 	"github.com/zealish/zealish-router/internal/storage"
 )
 
@@ -35,6 +36,50 @@ func seedTrace(t *testing.T, store storage.Store, id string, at time.Time, model
 	}
 	if err := store.Traces().Record(context.Background(), trace); err != nil {
 		t.Fatalf("seed trace %s: %v", id, err)
+	}
+}
+
+// A request through /v1/messages is traced as Anthropic, one through
+// /v1/chat/completions as OpenAI, so the dashboard can tell the two client
+// populations apart even though both resolve the same alias.
+func TestGatewayRecordsClientDialect(t *testing.T) {
+	h, store, engine := newAdminServer(t)
+	engine.SetTraceStore(store.Traces())
+	engine.Reload([]storage.ModelAlias{
+		{Alias: "gpt-5", Provider: "openai", Model: "gpt-5-upstream"},
+	}, nil, provider.NewRegistry(&stubProvider{name: "openai"}))
+
+	if rec := postMessages(t, h, `{"model":"gpt-5","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`); rec.Code != http.StatusOK {
+		t.Fatalf("messages status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if rec := post(t, h, `{"model":"gpt-5","messages":[{"role":"user","content":"hi"}]}`); rec.Code != http.StatusOK {
+		t.Fatalf("chat status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+
+	traces, _, err := store.Traces().List(context.Background(), storage.TraceFilter{})
+	if err != nil {
+		t.Fatalf("list traces: %v", err)
+	}
+	if len(traces) != 2 {
+		t.Fatalf("traces = %d, want one per request", len(traces))
+	}
+
+	got := map[string]int{}
+	for _, tr := range traces {
+		got[tr.Dialect]++
+	}
+	if got[storage.DialectAnthropic] != 1 || got[storage.DialectOpenAI] != 1 {
+		t.Fatalf("dialects = %v, want one of each", got)
+	}
+
+	// The admin API serves the dialect and filters on it.
+	rec := adminRequest(t, h, http.MethodGet, "/api/v1/requests?dialect=anthropic", "")
+	list := decodeJSON[requestListResponse](t, rec)
+	if list.Total != 1 || len(list.Items) != 1 {
+		t.Fatalf("filtered list = %+v, want a single Anthropic trace", list)
+	}
+	if list.Items[0].Dialect != storage.DialectAnthropic {
+		t.Errorf("dialect = %q, want %q", list.Items[0].Dialect, storage.DialectAnthropic)
 	}
 }
 
