@@ -15,6 +15,7 @@ import (
 	"github.com/zealish/zealish-router/internal/auth"
 	"github.com/zealish/zealish-router/internal/cache"
 	"github.com/zealish/zealish-router/internal/config"
+	"github.com/zealish/zealish-router/internal/extension"
 	"github.com/zealish/zealish-router/internal/metrics"
 	"github.com/zealish/zealish-router/internal/router"
 	"github.com/zealish/zealish-router/internal/storage"
@@ -30,6 +31,9 @@ type Dependencies struct {
 	AdminAuth auth.Authenticator
 	// Quota enforces per-key rate limits and budgets on /v1. Nil disables it.
 	Quota *auth.Quota
+	// Extensions applies enabled request extensions (RTK, sanitization)
+	// before routing. Nil disables the extension system entirely.
+	Extensions *extension.Registry
 	// Cache serves repeated non-streaming completions. Nil disables it.
 	Cache   *cache.Cache
 	Metrics *metrics.Metrics

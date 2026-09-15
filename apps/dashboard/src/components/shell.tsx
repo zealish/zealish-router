@@ -12,6 +12,7 @@ import {
   Layers,
   LogOut,
   Network,
+  Puzzle,
   Server,
   Settings,
 } from "lucide-react";
@@ -31,6 +32,7 @@ const NAV = [
   { href: "/proxies", label: "Proxy Pool", icon: Network },
   { href: "/keys", label: "Endpoint & Keys", icon: KeyRound },
   { href: "/cache", label: "Response Cache", icon: Database },
+  { href: "/extensions", label: "Extensions", icon: Puzzle },
   { href: "/settings", label: "Settings", icon: Settings },
 ];
 

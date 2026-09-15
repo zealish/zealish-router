@@ -61,6 +61,7 @@ func (h *handler) messages(w http.ResponseWriter, r *http.Request) {
 	// client spoke so the dashboard can separate the two populations.
 	r = r.WithContext(router.WithDialect(r.Context(), storage.DialectAnthropic))
 	converted := toOpenAIRequest(&req)
+	h.applyExtensions(converted)
 	if req.Stream {
 		w.Header().Set(cacheHeader, headerPass)
 		h.streamMessages(w, r, converted)

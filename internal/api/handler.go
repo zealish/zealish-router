@@ -10,6 +10,7 @@ import (
 
 	"github.com/zealish/zealish-router/internal/auth"
 	"github.com/zealish/zealish-router/internal/cache"
+	"github.com/zealish/zealish-router/internal/extension"
 	"github.com/zealish/zealish-router/internal/metrics"
 	"github.com/zealish/zealish-router/internal/provider"
 	"github.com/zealish/zealish-router/internal/router"
@@ -18,14 +19,23 @@ import (
 )
 
 type handler struct {
-	engine  *router.Engine
-	metrics *metrics.Metrics
-	cache   *cache.Cache
-	logger  *slog.Logger
+	engine     *router.Engine
+	extensions *extension.Registry
+	metrics    *metrics.Metrics
+	cache      *cache.Cache
+	logger     *slog.Logger
 }
 
 func newHandler(deps Dependencies) *handler {
-	return &handler{engine: deps.Engine, metrics: deps.Metrics, cache: deps.Cache, logger: deps.Logger}
+	return &handler{engine: deps.Engine, extensions: deps.Extensions, metrics: deps.Metrics, cache: deps.Cache, logger: deps.Logger}
+}
+
+// applyExtensions runs the enabled request extensions (sanitization, RTK)
+// over the messages before the request reaches routing or the cache key.
+func (h *handler) applyExtensions(req *openai.ChatCompletionRequest) {
+	if h.extensions != nil {
+		h.extensions.Apply(req)
+	}
 }
 
 func (h *handler) health(w http.ResponseWriter, _ *http.Request) {
@@ -86,6 +96,7 @@ func (h *handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if !allowModel(w, r, req.Model) {
 		return
 	}
+	h.applyExtensions(&req)
 
 	if req.Stream {
 		// A stream is relayed chunk by chunk and never buffered, so it is

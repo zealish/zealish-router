@@ -19,6 +19,7 @@ import (
 	"github.com/zealish/zealish-router/internal/auth"
 	"github.com/zealish/zealish-router/internal/cache"
 	"github.com/zealish/zealish-router/internal/config"
+	"github.com/zealish/zealish-router/internal/extension"
 	"github.com/zealish/zealish-router/internal/metrics"
 	"github.com/zealish/zealish-router/internal/router"
 	"github.com/zealish/zealish-router/internal/storage"
@@ -244,6 +245,11 @@ func serve(cfg *config.Config, configPath string, logger *slog.Logger) error {
 	adminAuth := auth.NewAdminService(cfg.Admin.Enabled, cfg.Admin.Token)
 	quota := auth.NewQuota(store.Usage())
 
+	extensions := extension.NewRegistry(store.Settings())
+	if err := extensions.Load(ctx); err != nil {
+		return err
+	}
+
 	var responses *cache.Cache
 	if cfg.Cache.Enabled {
 		responses = cache.New(cfg.Cache.TTL, cfg.Cache.MaxEntries)
@@ -253,16 +259,17 @@ func serve(cfg *config.Config, configPath string, logger *slog.Logger) error {
 	}
 
 	server := api.NewServer(api.Dependencies{
-		Config:    cfg,
-		Engine:    engine,
-		Loader:    loader,
-		Store:     store,
-		Auth:      authenticator,
-		AdminAuth: adminAuth,
-		Quota:     quota,
-		Cache:     responses,
-		Metrics:   collector,
-		Logger:    logger,
+		Config:     cfg,
+		Engine:     engine,
+		Loader:     loader,
+		Store:      store,
+		Auth:       authenticator,
+		AdminAuth:  adminAuth,
+		Quota:      quota,
+		Extensions: extensions,
+		Cache:      responses,
+		Metrics:    collector,
+		Logger:     logger,
 	})
 
 	// Routing lives in the database, so a configuration reload only refreshes
