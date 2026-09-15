@@ -79,6 +79,9 @@ func newRoutes(deps Dependencies, h *handler) http.Handler {
 		v1.Get("/models", h.listModels)
 		v1.Post("/chat/completions", h.chatCompletions)
 		v1.Post("/embeddings", h.embeddings)
+		// The Anthropic dialect, for clients that speak Messages rather than
+		// Chat Completions. Same auth, quota, allowlist and routing.
+		v1.Post("/messages", h.messages)
 	})
 
 	if deps.Config.Admin.Enabled {

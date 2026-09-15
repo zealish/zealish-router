@@ -76,6 +76,31 @@ func TestWriterHeartbeatIsComment(t *testing.T) {
 	}
 }
 
+func TestWriterNamedEventPrefixesEventLine(t *testing.T) {
+	rec := httptest.NewRecorder()
+	w, _ := NewWriter(rec)
+
+	if err := w.NamedEvent("message_stop", chunk{ID: "a"}); err != nil {
+		t.Fatalf("NamedEvent: %v", err)
+	}
+	want := "event: message_stop\ndata: {\"id\":\"a\"}\n\n"
+	if got := rec.Body.String(); got != want {
+		t.Fatalf("body = %q, want %q", got, want)
+	}
+}
+
+func TestWriterNamedEventWithoutNameIsPlainFrame(t *testing.T) {
+	rec := httptest.NewRecorder()
+	w, _ := NewWriter(rec)
+
+	if err := w.NamedEvent("", chunk{ID: "a"}); err != nil {
+		t.Fatalf("NamedEvent: %v", err)
+	}
+	if got := rec.Body.String(); got != "data: {\"id\":\"a\"}\n\n" {
+		t.Fatalf("body = %q, want an unnamed frame", got)
+	}
+}
+
 func TestRelayForwardsAndTerminates(t *testing.T) {
 	rec := httptest.NewRecorder()
 	w, _ := NewWriter(rec)

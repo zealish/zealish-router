@@ -65,8 +65,20 @@ func (s *Writer) Started() bool { return s.started }
 
 // Event writes v as a JSON `data:` frame and flushes it.
 func (s *Writer) Event(v any) error {
+	return s.NamedEvent("", v)
+}
+
+// NamedEvent writes v as a JSON `data:` frame preceded by an `event:` line, as
+// the Anthropic Messages stream requires. An empty name writes the plain frame
+// OpenAI clients expect.
+func (s *Writer) NamedEvent(name string, v any) error {
 	s.Start()
 
+	if name != "" {
+		if _, err := fmt.Fprintf(s.w, "event: %s\n", name); err != nil {
+			return fmt.Errorf("stream: write frame: %w", err)
+		}
+	}
 	if _, err := s.w.Write([]byte("data: ")); err != nil {
 		return fmt.Errorf("stream: write frame: %w", err)
 	}

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/zealish/zealish-router/pkg/anthropic"
 	"github.com/zealish/zealish-router/pkg/openai"
 )
 
@@ -194,7 +195,7 @@ func TestToAnthropicMultimodalContent(t *testing.T) {
 		t.Errorf("block[0] = %v", blocks[0])
 	}
 
-	var inline anthropicSource
+	var inline anthropic.Source
 	if err := json.Unmarshal(blocks[1]["source"], &inline); err != nil {
 		t.Fatalf("inline source: %v", err)
 	}
@@ -202,7 +203,7 @@ func TestToAnthropicMultimodalContent(t *testing.T) {
 		t.Errorf("inline source = %+v, want the decoded data URL", inline)
 	}
 
-	var remote anthropicSource
+	var remote anthropic.Source
 	if err := json.Unmarshal(blocks[2]["source"], &remote); err != nil {
 		t.Fatalf("remote source: %v", err)
 	}

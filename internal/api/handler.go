@@ -63,7 +63,7 @@ func allowModel(w http.ResponseWriter, r *http.Request, model string) bool {
 		return true
 	}
 	// 403, not 404: the model may well exist, this key just cannot reach it.
-	writeError(w, http.StatusForbidden, "invalid_request_error",
+	writeGatewayError(w, r, http.StatusForbidden, "invalid_request_error",
 		"Model '"+model+"' is not permitted for this API key.")
 	return false
 }
@@ -102,7 +102,7 @@ func (h *handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := h.engine.ChatCompletion(r.Context(), &req)
 	if err != nil {
-		h.writeEngineError(w, err)
+		h.writeEngineError(w, r, err)
 		return
 	}
 
@@ -146,7 +146,7 @@ func (h *handler) embeddings(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := h.engine.Embeddings(r.Context(), &req)
 	if err != nil {
-		h.writeEngineError(w, err)
+		h.writeEngineError(w, r, err)
 		return
 	}
 
@@ -171,7 +171,7 @@ func (h *handler) streamCompletion(w http.ResponseWriter, r *http.Request, req *
 	// no headers are committed until the first chunk is framed.
 	chunks, err := h.engine.ChatCompletionStream(r.Context(), req)
 	if err != nil {
-		h.writeEngineError(w, err)
+		h.writeEngineError(w, r, err)
 		return
 	}
 
@@ -189,14 +189,14 @@ func (h *handler) streamCompletion(w http.ResponseWriter, r *http.Request, req *
 	}
 }
 
-func (h *handler) writeEngineError(w http.ResponseWriter, err error) {
+func (h *handler) writeEngineError(w http.ResponseWriter, r *http.Request, err error) {
 	var upstream *provider.Error
 
 	switch {
 	case errors.Is(err, router.ErrUnknownModel):
-		writeError(w, http.StatusNotFound, "invalid_request_error", err.Error())
+		writeGatewayError(w, r, http.StatusNotFound, "invalid_request_error", err.Error())
 	case errors.Is(err, provider.ErrNotFound):
-		writeError(w, http.StatusNotFound, "invalid_request_error", err.Error())
+		writeGatewayError(w, r, http.StatusNotFound, "invalid_request_error", err.Error())
 	case errors.Is(err, context.Canceled):
 		// Client hung up; nothing useful left to write.
 		return
@@ -204,16 +204,16 @@ func (h *handler) writeEngineError(w http.ResponseWriter, err error) {
 		// The alias resolves to a dialect without this endpoint: a routing
 		// mistake, but the client is the one who has to pick another model.
 		h.logger.Warn("endpoint unsupported by route", slog.Any("error", err))
-		writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		writeGatewayError(w, r, http.StatusBadRequest, "invalid_request_error", err.Error())
 	case errors.As(err, &upstream) && !provider.Retryable(err) && upstream.Status > 0:
 		// Terminal 4xx from upstream: surface it as-is, no fallback happened.
 		h.logger.Warn("upstream rejected request",
 			slog.String("provider", upstream.Provider),
 			slog.Int("status", upstream.Status),
 			slog.Any("error", err))
-		writeError(w, upstream.Status, "invalid_request_error", upstream.Message)
+		writeGatewayError(w, r, upstream.Status, "invalid_request_error", upstream.Message)
 	default:
 		h.logger.Error("upstream failure", slog.Any("error", err))
-		writeError(w, http.StatusBadGateway, "api_error", "Upstream provider request failed.")
+		writeGatewayError(w, r, http.StatusBadGateway, "api_error", "Upstream provider request failed.")
 	}
 }

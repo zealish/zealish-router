@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/zealish/zealish-router/pkg/anthropic"
 	"github.com/zealish/zealish-router/pkg/openai"
 )
 
@@ -45,30 +46,6 @@ type openAIContentPart struct {
 	} `json:"image_url,omitempty"`
 }
 
-// --- Anthropic-side wire shapes ---
-
-// anthropicTool is one entry of the request's tools array.
-type anthropicTool struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description,omitempty"`
-	InputSchema json.RawMessage `json:"input_schema"`
-}
-
-// anthropicToolChoice selects how the model may use the declared tools.
-type anthropicToolChoice struct {
-	Type string `json:"type"`
-	Name string `json:"name,omitempty"`
-}
-
-// anthropicSource carries inline or referenced binary content of an image
-// block. Anthropic takes base64 payloads inline and remote images by URL.
-type anthropicSource struct {
-	Type      string `json:"type"`
-	MediaType string `json:"media_type,omitempty"`
-	Data      string `json:"data,omitempty"`
-	URL       string `json:"url,omitempty"`
-}
-
 // emptySchema is sent when a tool declares no parameters: Anthropic requires
 // input_schema, while OpenAI treats parameters as optional.
 var emptySchema = json.RawMessage(`{"type":"object","properties":{}}`)
@@ -78,12 +55,12 @@ var emptySchema = json.RawMessage(`{"type":"object","properties":{}}`)
 // toAnthropicTools converts the OpenAI tools array. Entries that are not
 // function tools are dropped: Anthropic's server-side tool types are declared
 // differently and a passthrough would be rejected upstream.
-func toAnthropicTools(raw json.RawMessage) []anthropicTool {
+func toAnthropicTools(raw json.RawMessage) []anthropic.Tool {
 	var in []openAITool
 	if err := json.Unmarshal(raw, &in); err != nil {
 		return nil
 	}
-	out := make([]anthropicTool, 0, len(in))
+	out := make([]anthropic.Tool, 0, len(in))
 	for _, t := range in {
 		if t.Type != "" && t.Type != "function" {
 			continue
@@ -95,7 +72,7 @@ func toAnthropicTools(raw json.RawMessage) []anthropicTool {
 		if len(schema) == 0 {
 			schema = emptySchema
 		}
-		out = append(out, anthropicTool{
+		out = append(out, anthropic.Tool{
 			Name:        t.Function.Name,
 			Description: t.Function.Description,
 			InputSchema: schema,
@@ -109,16 +86,16 @@ func toAnthropicTools(raw json.RawMessage) []anthropicTool {
 
 // toAnthropicToolChoice converts tool_choice, which OpenAI expresses either as
 // a string ("auto", "none", "required") or as an object naming one function.
-func toAnthropicToolChoice(raw json.RawMessage) *anthropicToolChoice {
+func toAnthropicToolChoice(raw json.RawMessage) *anthropic.ToolChoice {
 	var name string
 	if err := json.Unmarshal(raw, &name); err == nil {
 		switch name {
 		case "auto":
-			return &anthropicToolChoice{Type: "auto"}
+			return &anthropic.ToolChoice{Type: "auto"}
 		case "none":
-			return &anthropicToolChoice{Type: "none"}
+			return &anthropic.ToolChoice{Type: "none"}
 		case "required", "any":
-			return &anthropicToolChoice{Type: "any"}
+			return &anthropic.ToolChoice{Type: "any"}
 		default:
 			return nil
 		}
@@ -133,7 +110,7 @@ func toAnthropicToolChoice(raw json.RawMessage) *anthropicToolChoice {
 	if err := json.Unmarshal(raw, &obj); err != nil || obj.Function.Name == "" {
 		return nil
 	}
-	return &anthropicToolChoice{Type: "tool", Name: obj.Function.Name}
+	return &anthropic.ToolChoice{Type: "tool", Name: obj.Function.Name}
 }
 
 // toAnthropicContent converts one OpenAI message body into Anthropic content
@@ -177,7 +154,7 @@ func toAnthropicContent(content json.RawMessage) json.RawMessage {
 
 // toAnthropicSource converts an OpenAI image URL. Data URLs carry the bytes
 // inline and become a base64 source; anything else is passed as a URL source.
-func toAnthropicSource(url string) *anthropicSource {
+func toAnthropicSource(url string) *anthropic.Source {
 	if url == "" {
 		return nil
 	}
@@ -190,9 +167,9 @@ func toAnthropicSource(url string) *anthropicSource {
 		if !isBase64 {
 			return nil
 		}
-		return &anthropicSource{Type: "base64", MediaType: mediaType, Data: data}
+		return &anthropic.Source{Type: "base64", MediaType: mediaType, Data: data}
 	}
-	return &anthropicSource{Type: "url", URL: url}
+	return &anthropic.Source{Type: "url", URL: url}
 }
 
 // toAnthropicAssistant converts an assistant message that carries tool calls.
@@ -225,13 +202,13 @@ func toAnthropicAssistant(m openai.Message) json.RawMessage {
 
 // toAnthropicToolResult converts an OpenAI tool message into the user-role
 // tool_result block Anthropic expects.
-func toAnthropicToolResult(m openai.Message) (anthropicMessage, bool) {
+func toAnthropicToolResult(m openai.Message) (anthropic.Message, bool) {
 	var id string
 	if raw, ok := m.Extra["tool_call_id"]; ok {
 		_ = json.Unmarshal(raw, &id)
 	}
 	if id == "" {
-		return anthropicMessage{}, false
+		return anthropic.Message{}, false
 	}
 	content, ok := m.Text()
 	if !ok {
@@ -242,7 +219,7 @@ func toAnthropicToolResult(m openai.Message) (anthropicMessage, bool) {
 		"tool_use_id": id,
 		"content":     content,
 	})
-	return anthropicMessage{
+	return anthropic.Message{
 		Role:    "user",
 		Content: mustMarshal([]json.RawMessage{block}),
 	}, true
@@ -264,7 +241,7 @@ func decodeToolCalls(raw json.RawMessage) []openAIToolCall {
 
 // toolCallsFrom converts the tool_use blocks of a completed response into the
 // OpenAI tool_calls array carried on the assistant message.
-func toolCallsFrom(content []anthropicContent) json.RawMessage {
+func toolCallsFrom(content []anthropic.ContentBlock) json.RawMessage {
 	calls := make([]openAIToolCall, 0, len(content))
 	for _, c := range content {
 		if c.Type != "tool_use" {

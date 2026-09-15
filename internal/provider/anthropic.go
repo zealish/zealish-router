@@ -7,12 +7,9 @@ import (
 	"io"
 	"strings"
 
+	"github.com/zealish/zealish-router/pkg/anthropic"
 	"github.com/zealish/zealish-router/pkg/openai"
 )
-
-// anthropicVersion is the wire version header every Anthropic-compatible
-// upstream requires.
-const anthropicVersion = "2023-06-01"
 
 // defaultMaxTokens is sent when the client omits max_tokens: Anthropic rejects
 // a request without it, while OpenAI treats it as optional.
@@ -34,7 +31,7 @@ func NewAnthropic(opts Options) *Anthropic {
 	if opts.AuthHeader == "" && !isBearerToken(opts.APIKey) {
 		opts.AuthHeader = "x-api-key"
 	}
-	headers := map[string]string{"anthropic-version": anthropicVersion}
+	headers := map[string]string{"anthropic-version": anthropic.Version}
 	return &Anthropic{httpProvider: newHTTPProvider(opts, headers)}
 }
 
@@ -44,83 +41,19 @@ func isBearerToken(key string) bool {
 	return strings.HasPrefix(key, "sk-ant-oat") || strings.HasPrefix(key, "oauth-")
 }
 
-// --- wire types ---
-
-type anthropicRequest struct {
-	Model       string               `json:"model"`
-	Messages    []anthropicMessage   `json:"messages"`
-	System      string               `json:"system,omitempty"`
-	MaxTokens   int                  `json:"max_tokens"`
-	Stream      bool                 `json:"stream,omitempty"`
-	Temperature *float64             `json:"temperature,omitempty"`
-	TopP        *float64             `json:"top_p,omitempty"`
-	StopSeqs    []string             `json:"stop_sequences,omitempty"`
-	Tools       []anthropicTool      `json:"tools,omitempty"`
-	ToolChoice  *anthropicToolChoice `json:"tool_choice,omitempty"`
-}
-
-type anthropicMessage struct {
-	Role    string          `json:"role"`
-	Content json.RawMessage `json:"content"`
-}
-
-type anthropicResponse struct {
-	ID         string             `json:"id"`
-	Model      string             `json:"model"`
-	Content    []anthropicContent `json:"content"`
-	StopReason string             `json:"stop_reason"`
-	Usage      *anthropicUsage    `json:"usage,omitempty"`
-}
-
-type anthropicContent struct {
-	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
-
-	// Tool-use blocks carry the call the model wants made.
-	ID    string          `json:"id,omitempty"`
-	Name  string          `json:"name,omitempty"`
-	Input json.RawMessage `json:"input,omitempty"`
-}
-
-type anthropicUsage struct {
-	InputTokens              int `json:"input_tokens"`
-	OutputTokens             int `json:"output_tokens"`
-	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
-	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
-}
-
-// anthropicEvent is one decoded SSE payload of a streaming response.
-type anthropicEvent struct {
-	Type  string `json:"type"`
-	Index int    `json:"index"`
-	Delta *struct {
-		Type        string `json:"type"`
-		Text        string `json:"text"`
-		PartialJSON string `json:"partial_json"`
-		StopReason  string `json:"stop_reason"`
-	} `json:"delta"`
-	ContentBlock *anthropicContent `json:"content_block"`
-	Message      *struct {
-		ID    string          `json:"id"`
-		Model string          `json:"model"`
-		Usage *anthropicUsage `json:"usage"`
-	} `json:"message"`
-	Usage *anthropicUsage `json:"usage"`
-}
-
 // --- translation ---
 
 // toAnthropic converts an OpenAI request. System messages are hoisted into the
 // top-level system field, which is where Anthropic expects them.
-func toAnthropic(req *openai.ChatCompletionRequest, stream bool) *anthropicRequest {
-	out := &anthropicRequest{
+func toAnthropic(req *openai.ChatCompletionRequest, stream bool) *anthropic.Request {
+	out := &anthropic.Request{
 		Model:       req.Model,
 		Stream:      stream,
 		MaxTokens:   defaultMaxTokens,
 		Temperature: req.Temperature,
 		TopP:        req.TopP,
 		StopSeqs:    req.Stop,
-		Messages:    make([]anthropicMessage, 0, len(req.Messages)),
+		Messages:    make([]anthropic.Message, 0, len(req.Messages)),
 	}
 	if req.MaxTokens != nil && *req.MaxTokens > 0 {
 		out.MaxTokens = *req.MaxTokens
@@ -145,23 +78,25 @@ func toAnthropic(req *openai.ChatCompletionRequest, stream bool) *anthropicReque
 				out.Messages = append(out.Messages, msg)
 			}
 		case "assistant":
-			out.Messages = append(out.Messages, anthropicMessage{
+			out.Messages = append(out.Messages, anthropic.Message{
 				Role:    "assistant",
 				Content: toAnthropicAssistant(m),
 			})
 		default:
-			out.Messages = append(out.Messages, anthropicMessage{
+			out.Messages = append(out.Messages, anthropic.Message{
 				Role:    m.Role,
 				Content: toAnthropicContent(m.Content),
 			})
 		}
 	}
-	out.System = strings.Join(system, "\n\n")
+	if len(system) > 0 {
+		out.System = mustMarshal(strings.Join(system, "\n\n"))
+	}
 	return out
 }
 
 // fromAnthropic converts a completed response back to the OpenAI shape.
-func fromAnthropic(resp *anthropicResponse) *openai.ChatCompletionResponse {
+func fromAnthropic(resp *anthropic.Response) *openai.ChatCompletionResponse {
 	var text strings.Builder
 	for _, c := range resp.Content {
 		if c.Type == "text" {
@@ -169,7 +104,10 @@ func fromAnthropic(resp *anthropicResponse) *openai.ChatCompletionResponse {
 		}
 	}
 	content, _ := json.Marshal(text.String())
-	reason := finishReason(resp.StopReason)
+	var reason string
+	if resp.StopReason != nil {
+		reason = finishReason(*resp.StopReason)
+	}
 
 	msg := &openai.Message{Role: "assistant", Content: content}
 	if calls := toolCallsFrom(resp.Content); calls != nil {
@@ -191,7 +129,7 @@ func fromAnthropic(resp *anthropicResponse) *openai.ChatCompletionResponse {
 
 // fromAnthropicUsage maps Anthropic token accounting onto the OpenAI fields,
 // keeping the cache breakdown the pricing layer bills on.
-func fromAnthropicUsage(u *anthropicUsage) *openai.Usage {
+func fromAnthropicUsage(u *anthropic.Usage) *openai.Usage {
 	if u == nil {
 		return nil
 	}
@@ -241,7 +179,7 @@ func (p *Anthropic) ChatCompletion(ctx context.Context, req *openai.ChatCompleti
 		_ = resp.Body.Close()
 	}()
 
-	var out anthropicResponse
+	var out anthropic.Response
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, &Error{Provider: p.opts.Name, Message: fmt.Sprintf("decode response: %v", err)}
 	}
@@ -288,7 +226,7 @@ func (p *Anthropic) Embeddings(context.Context, *openai.EmbeddingRequest) (*open
 func pumpAnthropic(ctx context.Context, body io.Reader, model string, out chan<- openai.StreamChunk) {
 	var (
 		id    string
-		usage = &anthropicUsage{}
+		usage = &anthropic.Usage{}
 		tools = newToolCallStream()
 	)
 
@@ -305,7 +243,7 @@ func pumpAnthropic(ctx context.Context, body io.Reader, model string, out chan<-
 	}
 
 	scanSSE(body, func(_, payload string) bool {
-		var ev anthropicEvent
+		var ev anthropic.Event
 		if err := json.Unmarshal([]byte(payload), &ev); err != nil {
 			return true // skip malformed event, keep the stream alive
 		}
@@ -374,7 +312,7 @@ func pumpAnthropic(ctx context.Context, body io.Reader, model string, out chan<-
 
 // mergeAnthropicUsage folds a partial usage report into the running total;
 // Anthropic reports input tokens at message_start and output at message_delta.
-func mergeAnthropicUsage(dst *anthropicUsage, src *anthropicUsage) {
+func mergeAnthropicUsage(dst *anthropic.Usage, src *anthropic.Usage) {
 	if src == nil {
 		return
 	}

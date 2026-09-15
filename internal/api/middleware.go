@@ -127,7 +127,7 @@ func authenticate(a auth.Authenticator) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			identity, err := a.Authenticate(r.Context(), auth.FromRequest(r))
 			if err != nil {
-				writeError(w, http.StatusUnauthorized, "invalid_request_error", "Invalid API key provided.")
+				writeGatewayError(w, r, http.StatusUnauthorized, "invalid_request_error", "Invalid API key provided.")
 				return
 			}
 			next.ServeHTTP(w, r.WithContext(auth.WithIdentity(r.Context(), identity)))
@@ -158,11 +158,11 @@ func enforceQuota(q *auth.Quota) func(http.Handler) http.Handler {
 			case errors.Is(err, auth.ErrRateLimited):
 				// The window slides, so a slot frees up within a minute.
 				w.Header().Set("Retry-After", "60")
-				writeError(w, http.StatusTooManyRequests, "rate_limit_error",
+				writeGatewayError(w, r, http.StatusTooManyRequests, "rate_limit_error",
 					"Rate limit exceeded for this API key.")
 				return
 			case errors.Is(err, auth.ErrBudgetExceeded):
-				writeError(w, http.StatusTooManyRequests, "insufficient_quota",
+				writeGatewayError(w, r, http.StatusTooManyRequests, "insufficient_quota",
 					"Monthly budget exhausted for this API key.")
 				return
 			}

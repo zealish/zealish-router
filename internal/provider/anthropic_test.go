@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/zealish/zealish-router/pkg/anthropic"
 	"github.com/zealish/zealish-router/pkg/openai"
 )
 
@@ -40,7 +41,7 @@ func TestAnthropicChatCompletion(t *testing.T) {
 	var (
 		gotPath string
 		gotHdr  http.Header
-		gotBody anthropicRequest
+		gotBody anthropic.Request
 	)
 	p := newAnthropicProvider(t, Options{APIKey: "sk-ant-key"}, func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
@@ -68,12 +69,12 @@ func TestAnthropicChatCompletion(t *testing.T) {
 	if gotHdr.Get("Authorization") != "" {
 		t.Errorf("api-key providers must not send Authorization, got %q", gotHdr.Get("Authorization"))
 	}
-	if gotHdr.Get("anthropic-version") != anthropicVersion {
+	if gotHdr.Get("anthropic-version") != anthropic.Version {
 		t.Errorf("anthropic-version = %q", gotHdr.Get("anthropic-version"))
 	}
 
-	if gotBody.System != "be brief" {
-		t.Errorf("system = %q, want the hoisted system message", gotBody.System)
+	if got := anthropic.SystemText(gotBody.System); got != "be brief" {
+		t.Errorf("system = %q, want the hoisted system message", got)
 	}
 	if len(gotBody.Messages) != 1 || gotBody.Messages[0].Role != "user" {
 		t.Fatalf("messages = %+v, want the user message only", gotBody.Messages)
@@ -100,7 +101,7 @@ func TestAnthropicChatCompletion(t *testing.T) {
 }
 
 func TestAnthropicDefaultsMaxTokens(t *testing.T) {
-	var gotBody anthropicRequest
+	var gotBody anthropic.Request
 	p := newAnthropicProvider(t, Options{APIKey: "k"}, func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
 		_, _ = io.WriteString(w, `{"id":"m","content":[]}`)
@@ -150,7 +151,7 @@ func TestAnthropicChatCompletionStream(t *testing.T) {
 
 	var gotStream bool
 	p := newAnthropicProvider(t, Options{APIKey: "k"}, func(w http.ResponseWriter, r *http.Request) {
-		var req anthropicRequest
+		var req anthropic.Request
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		gotStream = req.Stream
 		w.Header().Set("Content-Type", "text/event-stream")
