@@ -155,6 +155,18 @@ export default function ProvidersPage() {
       alias_prefix: draft.alias_prefix || entry.alias_prefix,
     });
   };
+  const openCatalog = (entry: CatalogEntry) => {
+    const base = blankDraft("api_key");
+    setDraft({
+      ...base,
+      catalog_id: entry.id,
+      kind: entry.kind,
+      base_url: entry.base_url,
+      name: entry.id,
+      alias_prefix: entry.alias_prefix,
+    });
+    setEditing(false);
+  };
 
   const save = async () => {
     if (!draft) return;
@@ -205,6 +217,11 @@ export default function ProvidersPage() {
   const providers = data ?? [];
   const groupSpec = PROVIDER_GROUPS.find((g) => g.id === draft?.group);
   const presets = (catalog.data ?? []).filter((e) => e.group === draft?.group);
+  const apiKeyCatalog = (catalog.data ?? []).filter(
+    (entry) => entry.group === "api_key",
+  );
+  // Configured catalog providers are rendered as normal provider cards below,
+  // which keeps their Models link available without duplicating the entry.
 
   return (
     <>
@@ -227,17 +244,52 @@ export default function ProvidersPage() {
                     {group.description}
                   </p>
                 </div>
-                <Button variant="outline" onClick={() => openAdd(group.id)}>
-                  <Plus />
-                  Add
-                </Button>
+                {group.id !== "api_key" ? (
+                  <Button variant="outline" onClick={() => openAdd(group.id)}>
+                    <Plus />
+                    Add
+                  </Button>
+                ) : null}
               </div>
+              {group.id === "api_key" && apiKeyCatalog.length > 0 ? (
+                <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                  {apiKeyCatalog
+                    .filter(
+                      (entry) =>
+                        !providers.some((p) => p.catalog_id === entry.id),
+                    )
+                    .map((entry) => (
+                      <Card key={entry.id} className="gap-4">
+                        <CardHeader>
+                          <CardTitle>{entry.label}</CardTitle>
+                          <CardDescription className="font-mono text-xs break-all">
+                            {entry.base_url}
+                          </CardDescription>
+                        </CardHeader>
+                        <CardContent className="space-y-4">
+                          <div className="flex flex-wrap gap-1.5">
+                            <Badge variant="secondary">API key</Badge>
+                            <Badge variant="outline">{entry.kind}</Badge>
+                            <Badge variant="outline">not connected</Badge>
+                          </div>
+                          <Button
+                            variant="default"
+                            size="sm"
+                            onClick={() => openCatalog(entry)}
+                          >
+                            Connect
+                          </Button>
+                        </CardContent>
+                      </Card>
+                    ))}
+                </div>
+              ) : null}
 
-              {members.length === 0 ? (
+              {members.length === 0 && group.id !== "api_key" ? (
                 <p className="text-muted-foreground rounded-xl border border-dashed py-8 text-center text-sm">
                   No {group.label.toLowerCase()}s configured.
                 </p>
-              ) : (
+              ) : members.length > 0 ? (
                 <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
                   {members.map((p) => {
                     const count = (models.data ?? []).filter(
@@ -324,7 +376,7 @@ export default function ProvidersPage() {
                     );
                   })}
                 </div>
-              )}
+              ) : null}
             </section>
           );
         })}

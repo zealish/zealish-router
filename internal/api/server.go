@@ -49,12 +49,13 @@ type Server struct {
 
 // NewServer builds the HTTP server and its routing table.
 func NewServer(deps Dependencies) *Server {
-	h := newHandler(deps)
+	active := newActiveRequests()
+	h := newHandler(deps, active)
 
 	return &Server{
 		http: &http.Server{
 			Addr:         deps.Config.Server.Address(),
-			Handler:      newRoutes(deps, h),
+			Handler:      newRoutes(deps, h, active),
 			ReadTimeout:  deps.Config.Server.ReadTimeout,
 			WriteTimeout: deps.Config.Server.WriteTimeout,
 		},
@@ -63,7 +64,12 @@ func NewServer(deps Dependencies) *Server {
 	}
 }
 
-func newRoutes(deps Dependencies, h *handler) http.Handler {
+func newRoutes(deps Dependencies, h *handler, trackers ...*activeRequests) http.Handler {
+	active := newActiveRequests()
+	if len(trackers) > 0 && trackers[0] != nil {
+		active = trackers[0]
+	}
+
 	r := chi.NewRouter()
 
 	r.Use(chimw.RequestID)
@@ -92,7 +98,7 @@ func newRoutes(deps Dependencies, h *handler) http.Handler {
 	})
 
 	if deps.Config.Admin.Enabled {
-		admin := newAdminHandler(deps)
+		admin := newAdminHandler(deps, active)
 		r.Route("/api/v1", func(api chi.Router) {
 			api.Use(cors(deps.Config.Admin.Origins))
 			api.Use(limitBody(deps.Config.Server.MaxBodyBytes))

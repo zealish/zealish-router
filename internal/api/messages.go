@@ -56,6 +56,8 @@ func (h *handler) messages(w http.ResponseWriter, r *http.Request) {
 	if !allowModel(w, r, req.Model) {
 		return
 	}
+	cleanup := h.trackActive(r, req.Model)
+	defer cleanup()
 
 	// Routing is dialect-agnostic, but the trace records which dialect the
 	// client spoke so the dashboard can separate the two populations.

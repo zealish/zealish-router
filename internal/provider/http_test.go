@@ -70,6 +70,37 @@ func TestChatCompletionHappyPath(t *testing.T) {
 		t.Errorf("Authorization = %q", auth)
 	}
 }
+func TestCommandCodeAPIKeyConnection(t *testing.T) {
+	var gotPath string
+	var gotHeaders http.Header
+	p, srv := newTestProvider(t, "commandcode", func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotHeaders = r.Header.Clone()
+		writeJSON(t, w, openai.ChatCompletionResponse{
+			ID: "cc-1", Object: "chat.completion", Model: "cc-model",
+			Choices: []openai.Choice{{Index: 0, Message: &openai.Message{Role: "assistant", Content: json.RawMessage(`"pong"`)}}},
+		})
+	})
+
+	// Use the real provider-compatible base path, then verify the OpenAI route.
+	_ = srv
+	resp, err := p.ChatCompletion(context.Background(), testRequest())
+	if err != nil {
+		t.Fatalf("CommandCode ChatCompletion: %v", err)
+	}
+	if resp.ID != "cc-1" {
+		t.Fatalf("response id = %q", resp.ID)
+	}
+	if gotPath != "/chat/completions" {
+		t.Errorf("path = %q, want /chat/completions", gotPath)
+	}
+	if got := gotHeaders.Get("Authorization"); got != "Bearer sk-test" {
+		t.Errorf("Authorization = %q, want Bearer sk-test", got)
+	}
+	if got := gotHeaders.Get("x-api-key"); got != "" {
+		t.Errorf("x-api-key = %q, want empty", got)
+	}
+}
 
 func TestChatCompletionStream(t *testing.T) {
 	body := "data: " + chunkJSON(t, "a") + "\n\n" +

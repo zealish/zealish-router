@@ -36,23 +36,19 @@ type adminHandler struct {
 	cache      *cache.Cache
 	extensions *extension.Registry
 	logger     *slog.Logger
+	active     *activeRequests
 }
 
-func newAdminHandler(deps Dependencies) *adminHandler {
+func newAdminHandler(deps Dependencies, active *activeRequests) *adminHandler {
 	return &adminHandler{
-		store:      deps.Store,
-		loader:     deps.Loader,
-		engine:     deps.Engine,
-		metrics:    deps.Metrics,
-		quota:      deps.Quota,
-		cache:      deps.Cache,
-		extensions: deps.Extensions,
-		logger:     deps.Logger,
+		store: deps.Store, loader: deps.Loader, engine: deps.Engine, metrics: deps.Metrics,
+		quota: deps.Quota, cache: deps.Cache, extensions: deps.Extensions, logger: deps.Logger, active: active,
 	}
 }
 
 func (h *adminHandler) routes(r chi.Router) {
 	r.Get("/overview", h.overview)
+	r.Get("/requests/active", h.activeRequests)
 	r.Get("/usage", h.usageSummary)
 	r.Get("/usage/recent", h.usageRecent)
 	r.Get("/usage/models", h.usageByModel)

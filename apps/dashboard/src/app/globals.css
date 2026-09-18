@@ -145,3 +145,21 @@
     linear-gradient(to bottom, var(--canvas-grid) 1px, transparent 1px);
   background-size: 50px 50px;
 }
+
+@keyframes flow {
+  from {
+    left: 0;
+  }
+  to {
+    left: calc(100% - 0.5rem);
+  }
+}
+
+@keyframes flow-reverse {
+  from {
+    right: 0;
+  }
+  to {
+    right: calc(100% - 0.5rem);
+  }
+}

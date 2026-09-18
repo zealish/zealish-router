@@ -102,6 +102,9 @@ func NewProviderClient(rec storage.Provider, pool *ProxyPool) provider.Provider 
 		APIKey:     rec.APIKey,
 		HTTPClient: client,
 	}
+	if rec.Name == "commandcode" || rec.CatalogID == "commandcode" {
+		return provider.NewCommandCode(opts)
+	}
 	if rec.Group == string(provider.GroupOAuth) {
 		opts.AuthHeader = "Authorization"
 		opts.APIKey = bearer(rec.APIKey)

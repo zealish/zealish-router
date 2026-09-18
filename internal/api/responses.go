@@ -57,6 +57,8 @@ func (h *handler) responses(w http.ResponseWriter, r *http.Request) {
 	if !allowModel(w, r, req.Model) {
 		return
 	}
+	cleanup := h.trackActive(r, req.Model)
+	defer cleanup()
 
 	converted, err := responsesToChatRequest(&req)
 	if err != nil {

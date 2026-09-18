@@ -236,6 +236,13 @@ export type RequestList = {
   offset: number;
 };
 
+export type ActiveRequest = {
+  request_id: string;
+  api_key: string;
+  model: string;
+  started_at: string;
+};
+
 export type ModelUsage = {
   alias: string;
   requests: number;

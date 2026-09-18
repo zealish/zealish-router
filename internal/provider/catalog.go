@@ -65,8 +65,8 @@ var catalog = []CatalogEntry{
 		ID:          "commandcode",
 		Label:       "Command Code",
 		Group:       GroupAPIKey,
-		Kind:        KindAnthropic,
-		BaseURL:     "https://api.commandcode.ai/provider/v1",
+		Kind:        KindOpenAI,
+		BaseURL:     "https://api.commandcode.ai",
 		AliasPrefix: "cc/",
 		Docs:        "https://commandcode.ai/docs/provider",
 	},
@@ -102,15 +102,6 @@ var catalog = []CatalogEntry{
 		BaseURL:     "https://api.anthropic.com/v1",
 		AliasPrefix: "claude/",
 	},
-	{
-		ID:          "commandcode-oauth",
-		Label:       "Command Code (OAuth token)",
-		Group:       GroupOAuth,
-		Kind:        KindAnthropic,
-		BaseURL:     "https://api.commandcode.ai/provider/v1",
-		AliasPrefix: "cc/",
-		Docs:        "https://commandcode.ai/docs/provider",
-	},
 }
 
 // Catalog returns the presets, optionally narrowed to one group.
@@ -127,7 +118,6 @@ func Catalog(group string) []CatalogEntry {
 
 // NormalizeKind maps a stored kind onto a known dialect, tolerating the
 // "-compatible" suffix the dashboard displays. Anything unrecognised falls back
-// to plain OpenAI, which every compatible upstream speaks.
 func NormalizeKind(kind string) string {
 	switch strings.TrimSuffix(strings.ToLower(strings.TrimSpace(kind)), "-compatible") {
 	case KindAnthropic, "claude":

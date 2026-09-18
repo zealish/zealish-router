@@ -349,8 +349,8 @@ func TestAdminProviderGroups(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get provider: %v", err)
 	}
-	if stored.BaseURL != "https://api.commandcode.ai/provider/v1" || stored.Kind != provider.KindAnthropic {
-		t.Errorf("stored = %+v, want the catalogue base url and anthropic kind", stored)
+	if stored.BaseURL != "https://api.commandcode.ai" || stored.Kind != provider.KindOpenAI {
+		t.Errorf("stored = %+v, want the catalogue base url and openai kind", stored)
 	}
 
 	// Custom providers still need their own base URL.

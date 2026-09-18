@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import { useState } from "react";
 import {
   Area,
@@ -24,6 +25,7 @@ import {
 import { DataTable, DataTableColumnHeader } from "@/components/data-table";
 import type { ColumnDef } from "@tanstack/react-table";
 import type {
+  ActiveRequest,
   ModelUsage,
   Overview,
   UsageEvent,
@@ -167,6 +169,7 @@ export default function OverviewPage() {
   const [statHours, setStatHours] = useState(0);
   const [lbHours, setLbHours] = useState(24);
   const [lbSort, setLbSort] = useState<LbSort>("requests");
+  const active = useResource<ActiveRequest[]>("/requests/active", 1000);
   const overview = useResource<Overview>(
     statHours ? `/overview?hours=${statHours}` : "/overview",
     POLL_MS,
@@ -180,6 +183,7 @@ export default function OverviewPage() {
   );
 
   const error =
+    active.error ??
     overview.error ??
     usage.error ??
     recent.error ??
@@ -258,6 +262,8 @@ export default function OverviewPage() {
           loading={loading}
         />
       </div>
+
+      <RequestFlow active={active.data ?? []} latest={recent.data?.[0]} />
 
       <div className="mt-6 grid gap-4 lg:grid-cols-3">
         <Card className="lg:col-span-2">
@@ -524,6 +530,91 @@ export default function OverviewPage() {
       </Card>
     </>
   );
+}
+
+function RequestFlow({
+  active,
+  latest,
+}: {
+  active: ActiveRequest[];
+  latest?: UsageEvent;
+}) {
+  const request = active[0];
+  const apiKey = request?.api_key ?? "endpoint-api-key";
+  const maskedKey = apiKey.length > 18 ? `${apiKey.slice(0, 8)}…${apiKey.slice(-6)}` : apiKey;
+  const model = request?.model ?? latest?.alias ?? "waiting for a model";
+  const isActive = active.length > 0;
+
+  return (
+    <Card className="relative mt-6 overflow-hidden border-primary/20 bg-linear-to-br from-primary/[0.06] via-card to-card">
+      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_0%,var(--color-primary)/0.12,transparent_48%)]" />
+      <CardHeader className="relative flex flex-row items-start justify-between gap-4 space-y-0">
+        <div>
+          <CardTitle>Live request flow</CardTitle>
+          <p className="text-muted-foreground mt-1 text-sm">API key → Zealish Router → model</p>
+        </div>
+        <span className="text-muted-foreground inline-flex items-center gap-2 text-xs">
+          <span className={`size-2 rounded-full ${isActive ? "animate-pulse bg-emerald-500" : "bg-primary"}`} />
+          {isActive ? `${active.length} active` : "waiting"}
+        </span>
+      </CardHeader>
+      <CardContent className="relative">
+        <div className="grid items-center gap-3 md:grid-cols-[1fr_auto_1fr_auto_1fr]">
+          <FlowNode icon={<KeyIcon />} label="API key" value={maskedKey} />
+          <FlowConnector active={isActive} />
+          <FlowNode icon={<Image src="/logo.webp" alt="" width={36} height={36} className="size-9 object-contain" />} label="Router" value="zealish-router" accent />
+          <FlowConnector active={isActive} reverse />
+          <FlowNode icon={<ModelIcon />} label="Model used" value={model} />
+        </div>
+        <div className="text-muted-foreground mt-4 flex flex-wrap gap-x-3 gap-y-1 text-xs">
+          <span>{request ? "Request in progress" : "No request in progress"}</span>
+          <span className="hidden sm:inline">•</span>
+          <span>{request ? new Date(request.started_at).toLocaleTimeString() : "Latest activity shown when idle"}</span>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function FlowNode({
+  icon,
+  label,
+  value,
+  accent = false,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  value: string;
+  accent?: boolean;
+}) {
+  return (
+    <div className={`min-w-0 rounded-xl border p-3 ${accent ? "border-primary/40 bg-primary/[0.08]" : "bg-background/60"}`}>
+      <div className="flex items-center gap-3">
+        <div className="text-primary flex size-10 shrink-0 items-center justify-center rounded-lg bg-primary/10">{icon}</div>
+        <div className="min-w-0">
+          <p className="text-muted-foreground text-[11px] uppercase tracking-wider">{label}</p>
+          <p className="truncate font-mono text-xs">{value}</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FlowConnector({ active, reverse = false }: { active: boolean; reverse?: boolean }) {
+  return (
+    <div className="relative hidden h-1 min-w-12 md:block">
+      <div className="bg-border absolute inset-x-0 top-1/2 h-px" />
+      <div className={`absolute top-1/2 size-2 -translate-y-1/2 rounded-full bg-primary ${reverse ? "animate-[flow-reverse_1.5s_linear_infinite]" : "animate-[flow_1.5s_linear_infinite]"} ${active ? "opacity-100" : "opacity-40"}`} />
+    </div>
+  );
+}
+
+function KeyIcon() {
+  return <span className="font-mono text-lg font-bold">#</span>;
+}
+
+function ModelIcon() {
+  return <span className="text-lg">✦</span>;
 }
 
 function ChartFrame({

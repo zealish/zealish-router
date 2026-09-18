@@ -92,6 +92,7 @@ func TestAnthropicChatCompletion(t *testing.T) {
 	if *resp.Choices[0].FinishReason != "stop" {
 		t.Errorf("finish_reason = %q, want stop", *resp.Choices[0].FinishReason)
 	}
+
 	if resp.Usage.PromptTokens != 8 || resp.Usage.CompletionTokens != 2 || resp.Usage.TotalTokens != 10 {
 		t.Errorf("usage = %+v, want prompt 8 / completion 2 / total 10", resp.Usage)
 	}

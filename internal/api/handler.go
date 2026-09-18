@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"time"
 
 	"github.com/zealish/zealish-router/internal/auth"
 	"github.com/zealish/zealish-router/internal/cache"
@@ -24,10 +25,29 @@ type handler struct {
 	metrics    *metrics.Metrics
 	cache      *cache.Cache
 	logger     *slog.Logger
+	active     *activeRequests
 }
 
-func newHandler(deps Dependencies) *handler {
-	return &handler{engine: deps.Engine, extensions: deps.Extensions, metrics: deps.Metrics, cache: deps.Cache, logger: deps.Logger}
+func newHandler(deps Dependencies, trackers ...*activeRequests) *handler {
+	active := newActiveRequests()
+	if len(trackers) > 0 && trackers[0] != nil {
+		active = trackers[0]
+	}
+	return &handler{engine: deps.Engine, extensions: deps.Extensions, metrics: deps.Metrics, cache: deps.Cache, logger: deps.Logger, active: active}
+}
+
+func (h *handler) trackActive(r *http.Request, model string) func() {
+	id, ok := router.RequestIDFrom(r.Context())
+	if !ok {
+		return func() {}
+	}
+	identity, _ := auth.FromContext(r.Context())
+	key := identity.Name
+	if key == "" {
+		key = identity.KeyID
+	}
+	h.active.add(activeRequest{RequestID: id, APIKey: key, Model: model, StartedAt: time.Now().UTC()})
+	return func() { h.active.remove(id) }
 }
 
 // applyExtensions runs the enabled request extensions (sanitization, RTK)
@@ -83,7 +103,6 @@ func (h *handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-
 	var req openai.ChatCompletionRequest
 	if err := json.Unmarshal(raw, &req); err != nil {
 		writeDecodeError(w, err, "Malformed JSON body.")
@@ -96,27 +115,23 @@ func (h *handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if !allowModel(w, r, req.Model) {
 		return
 	}
+	cleanup := h.trackActive(r, req.Model)
+	defer cleanup()
 	h.applyExtensions(&req)
-
 	if req.Stream {
-		// A stream is relayed chunk by chunk and never buffered, so it is
-		// neither served from nor admitted to the cache.
 		w.Header().Set(cacheHeader, headerPass)
 		h.streamCompletion(w, r, &req)
 		return
 	}
-
 	key, served := h.lookupCache(w, endpointChat, req.Model, raw)
 	if served {
 		return
 	}
-
 	resp, err := h.engine.ChatCompletion(r.Context(), &req)
 	if err != nil {
 		h.writeEngineError(w, r, err)
 		return
 	}
-
 	body, err := json.Marshal(resp)
 	if err != nil {
 		h.logger.Error("encode completion", slog.Any("error", err))
@@ -132,7 +147,6 @@ func (h *handler) embeddings(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-
 	var req openai.EmbeddingRequest
 	if err := json.Unmarshal(raw, &req); err != nil {
 		writeDecodeError(w, err, "Malformed JSON body.")
@@ -149,18 +163,17 @@ func (h *handler) embeddings(w http.ResponseWriter, r *http.Request) {
 	if !allowModel(w, r, req.Model) {
 		return
 	}
-
+	cleanup := h.trackActive(r, req.Model)
+	defer cleanup()
 	key, served := h.lookupCache(w, endpointEmbeddings, req.Model, raw)
 	if served {
 		return
 	}
-
 	resp, err := h.engine.Embeddings(r.Context(), &req)
 	if err != nil {
 		h.writeEngineError(w, r, err)
 		return
 	}
-
 	body, err := json.Marshal(resp)
 	if err != nil {
 		h.logger.Error("encode embeddings", slog.Any("error", err))
