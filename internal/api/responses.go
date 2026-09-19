@@ -171,9 +171,10 @@ func itemToMessage(item openai.ResponseItem) (openai.Message, bool) {
 
 	case "function_call_output":
 		return openai.Message{
-			Role:    "tool",
-			Content: mustMarshal(outputText(item.Output)),
-			Extra:   map[string]json.RawMessage{"tool_call_id": mustMarshal(item.CallID)},
+			Role:            "tool",
+			Content:         contentToChat(item.Output),
+			ToolResultError: item.Status == "failed",
+			Extra:           map[string]json.RawMessage{"tool_call_id": mustMarshal(item.CallID)},
 		}, true
 
 	default:
@@ -209,7 +210,7 @@ func contentToChat(raw json.RawMessage) json.RawMessage {
 			converted = append(converted, mustMarshal(map[string]any{"type": "text", "text": p.Text}))
 		case "input_image":
 			if p.ImageURL == "" {
-				continue
+				return raw
 			}
 			textOnly = false
 			img := map[string]string{"url": p.ImageURL}
@@ -217,6 +218,8 @@ func contentToChat(raw json.RawMessage) json.RawMessage {
 				img["detail"] = p.Detail
 			}
 			converted = append(converted, mustMarshal(map[string]any{"type": "image_url", "image_url": img}))
+		default:
+			return raw
 		}
 	}
 	if len(converted) == 0 {

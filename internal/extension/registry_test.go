@@ -107,18 +107,21 @@ func TestApplyRTKRecordsStats(t *testing.T) {
 	}
 
 	lines := ""
-	for i := 0; i < 20; i++ {
+	for range 30 {
 		lines += "--- PASS: TestSomething\n"
 	}
-	req := &openai.ChatCompletionRequest{Messages: []openai.Message{textMsg("user", lines)}}
+	content, _ := json.Marshal(lines)
+	req := &openai.ChatCompletionRequest{Messages: []openai.Message{{Role: "tool", Content: content}}}
 	r.Apply(req)
-
 	stats := r.List()[0].Stats
 	if stats.BytesSaved == 0 {
-		t.Error("RTK BytesSaved = 0, want > 0 after compressing a test roll call")
+		t.Error("RTK BytesSaved = 0, want > 0 after compressing tool output")
 	}
 	if stats.MessagesRewritten != 1 {
 		t.Errorf("RTK MessagesRewritten = %d, want 1", stats.MessagesRewritten)
+	}
+	if got, _ := req.Messages[0].Text(); len(got) >= len(lines) {
+		t.Errorf("tool output length = %d, want less than %d", len(got), len(lines))
 	}
 }
 

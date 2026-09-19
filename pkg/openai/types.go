@@ -18,6 +18,10 @@ type Message struct {
 	// tool_call_id, refusal, reasoning and provider extensions. They are
 	// round-tripped verbatim.
 	Extra map[string]json.RawMessage `json:"-"`
+
+	// ToolResultError preserves an upstream tool_result error across request
+	// normalization without leaking an internal marker back onto the wire.
+	ToolResultError bool `json:"-"`
 }
 
 // UnmarshalJSON decodes a message, capturing unmodelled fields into Extra.

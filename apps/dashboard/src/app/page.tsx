@@ -266,7 +266,7 @@ export default function OverviewPage() {
       <RequestFlow active={active.data ?? []} latest={recent.data?.[0]} />
 
       <div className="mt-6 grid gap-4 lg:grid-cols-3">
-        <Card className="lg:col-span-2">
+        <Card className="min-h-0 lg:col-span-2 lg:h-[30rem]">
           <CardHeader className="flex flex-row items-center justify-between gap-4 space-y-0">
             <CardTitle>Request activity</CardTitle>
             <div className="flex gap-1">
@@ -390,11 +390,11 @@ export default function OverviewPage() {
           </CardContent>
         </Card>
 
-        <Card>
-          <CardHeader>
+        <Card className="min-h-0 lg:h-[30rem]">
+          <CardHeader className="shrink-0">
             <CardTitle>Recent models</CardTitle>
           </CardHeader>
-          <CardContent>
+          <CardContent className="min-h-0 flex-1 overflow-y-auto">
             {!models.data?.length ? (
               <p className="text-muted-foreground py-6 text-center text-sm">
                 {models.loading ? "Loading…" : "No requests yet."}

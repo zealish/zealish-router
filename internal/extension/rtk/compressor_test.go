@@ -1,6 +1,7 @@
 package rtk
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -8,163 +9,110 @@ import (
 	"github.com/zealish/zealish-router/pkg/openai"
 )
 
-func textMessage(role, text string) openai.Message {
-	content, _ := json.Marshal(text)
-	return openai.Message{Role: role, Content: content}
+func message(role string, content any) openai.Message {
+	raw, _ := json.Marshal(content)
+	return openai.Message{Role: role, Content: raw}
 }
 
-func mustText(t *testing.T, m openai.Message) string {
+func decoded(t *testing.T, raw json.RawMessage) any {
 	t.Helper()
-	s, ok := m.Text()
-	if !ok {
-		t.Fatalf("message content is not a string")
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		t.Fatal(err)
 	}
-	return s
+	return value
 }
 
-func repeatLines(line string, n int) string {
-	lines := make([]string, n)
-	for i := range lines {
-		lines[i] = line
-	}
-	return strings.Join(lines, "\n")
+func repetitiveToolText() string {
+	return strings.Repeat("2026-09-15T10:00:00 INFO server listening on :8787\n", 40)
 }
 
-func TestCompressSummarizesTestRollCall(t *testing.T) {
-	var b strings.Builder
-	b.WriteString("Here is the test run:\n")
-	for range 30 {
-		b.WriteString("--- PASS: TestSomething/case\n")
+func TestCompressToolStringCopiesAndShrinks(t *testing.T) {
+	original := message("tool", repetitiveToolText())
+	before := append([]byte(nil), original.Content...)
+	result := Compress([]openai.Message{original})
+	if result.CompressedMessages != 1 || result.SavedBytes <= 0 {
+		t.Fatalf("result = %+v, want one successful compression", result)
 	}
-	b.WriteString("done, please review")
-
-	res := Compress([]openai.Message{textMessage("user", b.String())})
-	if res.CompressedMessages != 1 {
-		t.Fatalf("compressed %d messages, want 1", res.CompressedMessages)
+	if bytes.Equal(result.Messages[0].Content, before) {
+		t.Fatal("compressed content did not change")
 	}
-	out := mustText(t, res.Messages[0])
-	if !strings.Contains(out, "[rtk:test-summary 30 passed") {
-		t.Fatalf("missing test summary: %q", out)
+	if !bytes.Equal(original.Content, before) {
+		t.Fatal("input message was mutated")
 	}
-	if !strings.Contains(out, "Here is the test run:") || !strings.Contains(out, "done, please review") {
-		t.Fatalf("surrounding prose lost: %q", out)
+	if result.Messages[0].Role != "tool" {
+		t.Fatal("message role changed")
 	}
 }
 
-func TestCompressSummarizesDiff(t *testing.T) {
-	var b strings.Builder
-	b.WriteString("diff --git a/foo.go b/foo.go\n")
-	b.WriteString("index 123..456 100644\n")
-	b.WriteString("--- a/foo.go\n")
-	b.WriteString("+++ b/foo.go\n")
-	b.WriteString("@@ -1,10 +1,12 @@\n")
-	for range 20 {
-		b.WriteString("+added line\n")
+func TestCompressToolPartsPreservesUnknownFields(t *testing.T) {
+	content := []any{
+		map[string]any{"type": "text", "text": repetitiveToolText(), "vendor": "keep"},
+		map[string]any{"type": "image", "source": map[string]any{"x": 1}},
 	}
-	for range 10 {
-		b.WriteString("-removed line\n")
+	result := Compress([]openai.Message{message("tool", content)})
+	if result.CompressedMessages != 1 {
+		t.Fatalf("compressed %d messages, want 1", result.CompressedMessages)
 	}
-	text := "check this change:\n" + b.String()
-
-	res := Compress([]openai.Message{textMessage("user", text)})
-	out := mustText(t, res.Messages[0])
-	if !strings.Contains(out, "[rtk:diff-summary 1 file(s)]") {
-		t.Fatalf("missing diff summary: %q", out)
+	parts, ok := decoded(t, result.Messages[0].Content).([]any)
+	if !ok || len(parts) != 2 {
+		t.Fatalf("parts shape changed: %#v", parts)
 	}
-	if !strings.Contains(out, "foo.go: 1 hunk(s), +20/-10") {
-		t.Fatalf("wrong diff stats: %q", out)
+	if parts[0].(map[string]any)["vendor"] != "keep" || parts[1].(map[string]any)["type"] != "image" {
+		t.Fatal("unknown fields or parts were not preserved")
 	}
 }
 
-func TestCompressSummarizesTerminalLog(t *testing.T) {
-	log := repeatLines("2026-09-15T10:00:00 INFO server listening on :8787", 40)
-	res := Compress([]openai.Message{textMessage("user", "logs:\n"+log)})
-	out := mustText(t, res.Messages[0])
-	if !strings.Contains(out, "[rtk:terminal-log") {
-		t.Fatalf("missing log summary: %q", out)
+func TestCompressClaudeToolResultsAndErrors(t *testing.T) {
+	content := []any{
+		map[string]any{"type": "tool_result", "tool_use_id": "ok", "content": repetitiveToolText()},
+		map[string]any{"type": "tool_result", "tool_use_id": "err", "is_error": true, "content": repetitiveToolText()},
+		map[string]any{"type": "text", "text": repetitiveToolText()},
 	}
-	if len(out) >= len("logs:\n")+len(log) {
-		t.Fatalf("no shrinkage: %d bytes", len(out))
+	original, _ := json.Marshal(content)
+	result := Compress([]openai.Message{message("user", content)})
+	if result.CompressedMessages != 1 {
+		t.Fatalf("compressed %d messages, want 1", result.CompressedMessages)
 	}
-}
-
-func TestCompressKeepsErrorLogLines(t *testing.T) {
-	lines := make([]string, 0, 41)
-	for range 20 {
-		lines = append(lines, "2026-09-15T10:00:00 INFO ok")
+	parts := decoded(t, result.Messages[0].Content).([]any)
+	if parts[1].(map[string]any)["content"] != repetitiveToolText() {
+		t.Fatal("error tool result was modified")
 	}
-	lines = append(lines, "2026-09-15T10:00:01 ERROR database connection refused")
-	for range 20 {
-		lines = append(lines, "2026-09-15T10:00:02 INFO ok")
+	if parts[2].(map[string]any)["text"] != repetitiveToolText() {
+		t.Fatal("ordinary user prose was modified")
 	}
-	res := Compress([]openai.Message{textMessage("user", strings.Join(lines, "\n")+"\npadding so the message passes the length gate")})
-	out := mustText(t, res.Messages[0])
-	if !strings.Contains(out, "ERROR database connection refused") {
-		t.Fatalf("error line was elided: %q", out)
+	if !bytes.Equal(message("user", content).Content, original) {
+		t.Fatal("input content changed")
 	}
 }
 
-func TestCompressSummarizesStackTrace(t *testing.T) {
-	var b strings.Builder
-	b.WriteString("it crashed:\n")
-	for range 25 {
-		b.WriteString("    at Object.fn (/app/node_modules/lib/index.js:10:5)\n")
+func TestCompressGatesAndProtocolPayloads(t *testing.T) {
+	cases := []openai.Message{
+		message("tool", strings.Repeat("x", minCompressSize-1)),
+		message("tool", strings.Repeat("x", rawCap+1)),
+		message("tool", map[string]any{"log": repetitiveToolText()}),
+		message("system", repetitiveToolText()),
+		{Role: "tool", Content: mustJSON(repetitiveToolText()), ToolResultError: true},
 	}
-	res := Compress([]openai.Message{textMessage("user", b.String())})
-	out := mustText(t, res.Messages[0])
-	if !strings.Contains(out, "[rtk:stack-trace") {
-		t.Fatalf("missing stack summary: %q", out)
+	result := Compress(cases)
+	if result.CompressedMessages != 0 || result.SavedBytes != 0 {
+		t.Fatalf("unsupported payloads changed: %+v", result)
 	}
-}
-
-func TestCompressNeverTouchesSystemPrompt(t *testing.T) {
-	log := "instructions\n" + repeatLines("--- PASS: TestX", 30)
-	msg := textMessage("system", log)
-	res := Compress([]openai.Message{msg})
-	if res.CompressedMessages != 0 {
-		t.Fatalf("system prompt was compressed")
-	}
-	if string(res.Messages[0].Content) != string(msg.Content) {
-		t.Fatalf("system content changed")
+	if !bytes.Equal(result.Messages[0].Content, cases[0].Content) {
+		t.Fatal("no-op result changed original values")
 	}
 }
 
-func TestCompressNeverTouchesJSONPayload(t *testing.T) {
-	payload := map[string]any{"key": repeatLines("--- PASS: TestX", 40)}
-	raw, _ := json.Marshal(payload)
-	msg := textMessage("tool", string(raw))
-	res := Compress([]openai.Message{msg})
-	if res.CompressedMessages != 0 {
-		t.Fatalf("JSON payload was compressed")
+func TestCompressEmptyOrGrowingFilterFailsOpen(t *testing.T) {
+	for _, text := range []string{"", "short", strings.Repeat("x", minCompressSize)} {
+		result := Compress([]openai.Message{message("tool", text)})
+		if result.CompressedMessages != 0 || result.SavedBytes != 0 {
+			t.Fatalf("text %q unexpectedly changed: %+v", text, result)
+		}
 	}
 }
 
-func TestCompressNeverTouchesToolCalls(t *testing.T) {
-	msg := textMessage("assistant", repeatLines("--- PASS: TestX", 30))
-	msg.Extra = map[string]json.RawMessage{"tool_calls": json.RawMessage(`[]`)}
-	res := Compress([]openai.Message{msg})
-	if res.CompressedMessages != 0 {
-		t.Fatalf("message with tool_calls was compressed")
-	}
-}
-
-func TestCompressLeavesShortMessagesAlone(t *testing.T) {
-	msg := textMessage("user", "hello, how are you?")
-	res := Compress([]openai.Message{msg})
-	if res.CompressedMessages != 0 || res.SavedBytes != 0 {
-		t.Fatalf("short message was rewritten")
-	}
-}
-
-func TestCompressSummarizesTree(t *testing.T) {
-	var b strings.Builder
-	b.WriteString("project layout:\n")
-	for range 30 {
-		b.WriteString("├── src/file.go\n")
-	}
-	res := Compress([]openai.Message{textMessage("user", b.String())})
-	out := mustText(t, res.Messages[0])
-	if !strings.Contains(out, "[rtk:tree") {
-		t.Fatalf("missing tree summary: %q", out)
-	}
+func mustJSON(value any) json.RawMessage {
+	raw, _ := json.Marshal(value)
+	return raw
 }

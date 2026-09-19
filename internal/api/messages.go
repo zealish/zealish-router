@@ -195,12 +195,13 @@ func toOpenAIMessages(m anthropic.Message) []openai.Message {
 				},
 			}))
 		case "tool_result":
-			// A tool result is its own message in the OpenAI dialect, and it
-			// must precede nothing else from this turn, so it is emitted first.
+			// Keep structured tool output intact so RTK can rewrite text
+			// parts without destroying images or other typed blocks.
 			out = append(out, openai.Message{
-				Role:    "tool",
-				Content: mustMarshal(toolResultText(b.Content)),
-				Extra:   map[string]json.RawMessage{"tool_call_id": mustMarshal(b.ToolUseID)},
+				Role:            "tool",
+				Content:         toolResultContent(b.Content),
+				ToolResultError: b.IsError,
+				Extra:           map[string]json.RawMessage{"tool_call_id": mustMarshal(b.ToolUseID)},
 			})
 		}
 	}
@@ -252,30 +253,55 @@ func imageURLOf(src *anthropic.Source) string {
 	}
 }
 
-// toolResultText flattens a tool_result body into the string OpenAI carries as
-// the tool message content. The API accepts a string or an array of blocks.
+// toolResultContent converts Anthropic tool-result blocks into Chat
+// Completions content while retaining images and other structured payloads.
+func toolResultContent(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return raw
+	}
+	blocks, ok := decodeBlocks(raw)
+	if !ok {
+		return raw
+	}
+	parts := make([]json.RawMessage, 0, len(blocks))
+	for _, b := range blocks {
+		switch b.Type {
+		case "text":
+			parts = append(parts, mustMarshal(map[string]any{"type": "text", "text": b.Text}))
+		case "image":
+			if url := imageURLOf(b.Source); url != "" {
+				parts = append(parts, mustMarshal(map[string]any{"type": "image_url", "image_url": map[string]string{"url": url}}))
+			}
+		default:
+			return raw
+		}
+	}
+	if len(parts) == 0 {
+		return raw
+	}
+	if len(parts) == 1 {
+		var p struct{ Type, Text string }
+		if json.Unmarshal(parts[0], &p) == nil && p.Type == "text" {
+			return mustMarshal(p.Text)
+		}
+	}
+	return mustMarshal(parts)
+}
+
+// toolResultText flattens a tool result for compatibility with older callers.
 func toolResultText(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""
 	}
 	var s string
-	if err := json.Unmarshal(raw, &s); err == nil {
+	if json.Unmarshal(raw, &s) == nil {
 		return s
 	}
-	blocks, ok := decodeBlocks(raw)
-	if !ok {
-		return string(raw)
-	}
-	var parts []string
-	for _, b := range blocks {
-		if b.Type == "text" && b.Text != "" {
-			parts = append(parts, b.Text)
-		}
-	}
-	if len(parts) == 0 {
-		return string(raw)
-	}
-	return strings.Join(parts, "\n")
+	return string(raw)
 }
 
 // toOpenAITools converts the declared tools. The two dialects carry the same

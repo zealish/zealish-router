@@ -33,10 +33,13 @@ License: Apache-2.0 · Platform: Linux, Docker
   tokens, cost and status for lifetime statistics
 - Built-in pricing table for cost attribution per request
 - Exact-match response cache so a replayed prompt costs nothing
-- Request extensions: RTK semantically compresses verbose tool output (logs,
-  diffs, stack traces) and Request Sanitization does mechanical cleanup
-  (whitespace, history windowing, dedup) — both toggleable from the dashboard,
-  with lifetime bytes/tokens saved reported alongside the enabled flag
+- Request extensions: RTK applies bounded semantic compression to verbose tool
+  output (logs, diffs, stack traces and repetitive test output) before routing;
+  errors, images and structured payloads are preserved while user/system prose,
+  tool schemas and function calls remain untouched. Request Sanitization handles
+  mechanical cleanup (whitespace, history windowing, dedup). Both are toggleable
+  from the dashboard, with lifetime bytes/tokens saved reported alongside the
+  enabled flag
 - Outbound proxy pool for reaching upstreams through rotating proxies
 - API key authentication (`zr_…` keys, only hashes stored)
 - SQLite persistence, pure Go — no cgo, `CGO_ENABLED=0` friendly
@@ -300,12 +303,23 @@ npm install
 npm run dev                    # http://localhost:3000
 ```
 
-Or run the router and the dashboard together from the repository root with
-`make dev`; Ctrl-C stops both.
+For production, build the dashboard and reload the existing PM2 process from
+the repository root. The included `ecosystem.config.cjs` uses the existing
+process name `zealish-router-app` and starts the dashboard on port `18888`:
 
-The router must have `admin.enabled: true` and list the dashboard origin under
-`admin.cors_origins`. The admin token is entered in the browser and kept in
-`localStorage`; it is never baked into the build.
+```sh
+npm --prefix apps/dashboard install
+npm --prefix apps/dashboard run build
+pm2 restart ecosystem.config.cjs --only zealish-router-app
+pm2 save
+```
+
+For a first-time setup only, use `pm2 start ecosystem.config.cjs`; do not start
+another dashboard process if `zealish-router-app` is already online.
+
+The router itself remains managed by systemd via
+`packaging/systemd/zealish-router.service`.
+
 
 ---
 

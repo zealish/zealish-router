@@ -140,7 +140,7 @@ func (r *Registry) List() []Info {
 		{
 			ID:          IDRTK,
 			Name:        "RTK — Reduce Token Kernel",
-			Description: "Semantic token reduction before routing: terminal logs, git diffs, tree/ls listings, stack traces and repetitive PASS/OK output are replaced with structured summaries. System prompts, user intent, tool schemas, JSON payloads and function calls are never modified.",
+			Description: "Bounded semantic compression for verbose tool output before routing: terminal logs, git diffs, tree listings, stack traces and repetitive test output are reduced while tool errors, images and structured payloads remain intact. User and system prose, tool schemas and function calls are never modified.",
 			Enabled:     st.rtkEnabled,
 			Config:      rtkCfg,
 			Stats:       statsOf(atomic.LoadInt64(&r.rtkMessages), atomic.LoadInt64(&r.rtkBytes)),
