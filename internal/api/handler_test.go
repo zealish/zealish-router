@@ -113,7 +113,6 @@ func newTestServerWithConfig(t *testing.T, p provider.Provider, tweak func(*conf
 	return newRoutes(deps, newHandler(deps))
 }
 
-
 func post(t *testing.T, h http.Handler, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
@@ -435,4 +434,3 @@ func TestEmbeddingsUnsupportedDialectIsBadRequest(t *testing.T) {
 		t.Fatalf("status = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
 	}
 }
-

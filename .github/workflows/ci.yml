@@ -12,9 +12,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v5
         with:
           go-version: '1.25'
           cache: true
@@ -40,16 +40,16 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v5
         with:
           go-version: '1.25'
           cache: true
 
       # v9 ships golangci-lint v2, which is what .golangci.yml targets;
       # older actions install v1 and cannot parse a version: "2" config.
-      - uses: golangci/golangci-lint-action@v9
+      - uses: golangci/golangci-lint-action@v6
         with:
           version: v2.13.2
 
@@ -59,9 +59,9 @@ jobs:
       run:
         working-directory: apps/dashboard
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v4
         with:
           node-version: '24'
           cache: npm
