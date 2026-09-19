@@ -56,3 +56,28 @@ func TestListModelsUpstreamError(t *testing.T) {
 		t.Errorf("message = %q, want the key redacted", perr.Message)
 	}
 }
+
+func TestListModelsContextMetadata(t *testing.T) {
+	p, _ := newTestProvider(t, "openai", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[
+			{"id":"length","context_length":8192,"context_window":4096,"max_context":2048},
+			{"id":"window","context_length":-1,"context_window":4096,"max_context":2048},
+			{"id":"maximum","max_context":2048},
+			{"id":"gpt-5"},
+			{"id":"invalid","context_length":-1,"context_window":-2,"max_context":-3}
+		]}`))
+	})
+	models, err := p.(ModelLister).ListModels(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]int{"length": 8192, "window": 4096, "maximum": 2048, "gpt-5": 0, "invalid": 0}
+	if len(models) != len(want) {
+		t.Fatalf("models = %+v", models)
+	}
+	for _, model := range models {
+		if got := model.Context(); got != want[model.ID] {
+			t.Errorf("%s context = %d, want %d", model.ID, got, want[model.ID])
+		}
+	}
+}

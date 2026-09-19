@@ -1,120 +1,255 @@
 package router
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
 	"slices"
 
+	"github.com/zealish/zealish-router/internal/provider"
 	"github.com/zealish/zealish-router/internal/storage"
+	"github.com/zealish/zealish-router/pkg/openai"
 )
 
-// Member ranks for the intelligent strategy. A rank always outweighs a score:
-// no amount of historical speed makes a provider that is currently down worth
-// trying before one that is up.
-const (
-	// rankReady is a provider with a closed circuit that passed its last probe.
-	rankReady = iota
-	// rankProbing is a provider admitting a recovery probe: worth trying, but
-	// only after every member known to be up.
-	rankProbing
-	// rankDown is an open circuit or a failed health probe. Such a member is
-	// skipped by dispatch anyway; it stays in the chain as a last resort.
-	rankDown
+// RequestRequirements describes features a candidate must support.
+type RequestRequirements struct {
+	Vision          bool
+	Tools           bool
+	JSONMode        bool
+	Embeddings      bool
+	Audio           bool
+	Streaming       bool
+	RequiredContext int
+}
+
+var (
+	ErrNoCompatibleModel = errors.New("NO_COMPATIBLE_MODEL")
+	ErrContextExceeded   = errors.New("CONTEXT_LIMIT_EXCEEDED")
+	ErrNoHealthyModel    = errors.New("NO_HEALTHY_MODEL")
 )
 
-// intelligentBaselineMs anchors the latency term: a member answering at the
-// baseline scores half of it, one twice as slow a third. It is deliberately
-// generous — the point is to separate a healthy route from a struggling one,
-// not to chase tens of milliseconds.
 const intelligentBaselineMs = 2000
 
-// unknownScore is what a member with no usable window scores. It is optimistic
-// on purpose — above anything a measured member can reach — so a route the
-// router has never tried is explored rather than starved by whichever member
-// happened to answer first.
-const unknownScore = 1.0
+type intelligentCandidate struct {
+	alias     string
+	poolOrder int
+	score     float64
+}
 
-// neutralScore is where a thin window is pulled towards: real evidence, but
-// too little of it to demote or promote a route on its own.
-const neutralScore = 0.75
-
-// intelligentOrder ranks a pool by how it is behaving right now: provider
-// health first, then success rate and latency over the rolling window. Members
-// that score the same keep the rotation order, so equally good routes still
-// share the traffic.
-func (rt *routes) intelligentOrder(combo storage.Combo, tick uint64) []string {
-	ordered := rotate(combo.Members, int(tick%uint64(len(combo.Members))))
-	if rt.engine == nil {
-		return ordered
-	}
-
-	type ranked struct {
-		alias string
-		rank  int
-		score float64
-	}
-
-	pool := make([]ranked, 0, len(ordered))
-	for _, alias := range ordered {
-		entry := ranked{alias: alias, rank: rankDown, score: unknownScore}
-		if m, ok := rt.models[alias]; ok {
-			entry.rank = rt.engine.rankOf(m.Provider)
-			entry.score = rt.engine.scoreOf(alias)
+func analyzeChatRequest(req *openai.ChatCompletionRequest) RequestRequirements {
+	r := RequestRequirements{Streaming: req.Stream, RequiredContext: estimateChatContext(req)}
+	for _, message := range req.Messages {
+		var parts []map[string]json.RawMessage
+		if json.Unmarshal(message.Content, &parts) != nil {
+			continue
 		}
-		pool = append(pool, entry)
-	}
-
-	slices.SortStableFunc(pool, func(a, b ranked) int {
-		if a.rank != b.rank {
-			return a.rank - b.rank
+		for _, part := range parts {
+			var kind string
+			_ = json.Unmarshal(part["type"], &kind)
+			switch kind {
+			case "image", "image_url", "input_image":
+				r.Vision = true
+			case "audio", "input_audio", "audio_url":
+				r.Audio = true
+			}
 		}
-		// Higher score first.
-		switch {
-		case a.score > b.score:
-			return -1
-		case a.score < b.score:
-			return 1
+	}
+	if raw := req.Extra["tools"]; len(raw) > 0 && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		var tools []json.RawMessage
+		r.Tools = json.Unmarshal(raw, &tools) == nil && len(tools) > 0
+	}
+	if raw := req.Extra["response_format"]; len(raw) > 0 {
+		var format struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(raw, &format) == nil {
+			r.JSONMode = format.Type == "json_object" || format.Type == "json_schema"
+		}
+	}
+	return r
+}
+
+func analyzeEmbeddingRequest(_ *openai.EmbeddingRequest) RequestRequirements {
+	return RequestRequirements{Embeddings: true}
+}
+
+// estimateChatContext approximates the number of tokens a provider will consume.
+// It is NOT a tokenizer — tokenizers vary by model, encoding and implementation.
+// This estimate counts textual request structure and reserves the requested output
+// budget (max_completion_tokens or max_tokens). Binary multimodal payloads are
+// deliberately not treated as prompt text; base64 data URLs do not inflate the
+// estimate. For capacity planning, use actual token metrics. For routing decisions,
+// prefer providers with compatible capabilities and adequate context windows.
+func estimateChatContext(req *openai.ChatCompletionRequest) int {
+	chars := 0
+	for _, message := range req.Messages {
+		chars = addContextSize(chars, len(message.Role))
+		chars = addContextSize(chars, len(message.Name))
+		chars = addContextSize(chars, estimateMessageContentChars(message.Content))
+		for _, key := range []string{"tool_calls", "tool_call_id", "function_call", "refusal", "reasoning", "reasoning_content"} {
+			chars = addContextSize(chars, len(message.Extra[key]))
+		}
+	}
+	for _, key := range []string{"tools", "functions", "response_format"} {
+		chars = addContextSize(chars, len(req.Extra[key]))
+	}
+	// Keep the shared rounding helper's addition away from integer overflow.
+	maxChars := int(^uint(0)>>1) - (charsPerToken - 1)
+	if chars > maxChars {
+		chars = maxChars
+	}
+	return addContextSize(tokensFromChars(chars), requestedOutputTokens(req))
+}
+
+func requestedOutputTokens(req *openai.ChatCompletionRequest) int {
+	if raw := req.Extra["max_completion_tokens"]; len(raw) > 0 {
+		var n int
+		if json.Unmarshal(raw, &n) == nil && n > 0 {
+			return n
+		}
+	}
+	if req.MaxTokens != nil && *req.MaxTokens > 0 {
+		return *req.MaxTokens
+	}
+	return 0
+}
+
+func estimateMessageContentChars(raw json.RawMessage) int {
+	if len(raw) == 0 {
+		return 0
+	}
+	var parts []struct {
+		Type string          `json:"type"`
+		Text json.RawMessage `json:"text"`
+	}
+	if json.Unmarshal(raw, &parts) != nil {
+		return contentLen(raw)
+	}
+	chars := 0
+	for _, part := range parts {
+		switch part.Type {
+		case "text", "input_text", "output_text":
+			chars = addContextSize(chars, contentLen(part.Text))
 		default:
-			return 0
+			// A fixed 256-token allowance avoids counting URLs/base64 as
+			// text. Actual image/audio costs depend on the provider, image
+			// dimensions, audio duration and detail; this is not a guarantee
+			// that an arbitrary multimodal input fits the advertised window.
+			chars = addContextSize(chars, 256*charsPerToken)
 		}
+	}
+	return chars
+}
+
+func addContextSize(total, amount int) int {
+	maxInt := int(^uint(0) >> 1)
+	if amount > maxInt-total {
+		return maxInt
+	}
+	return total + amount
+}
+
+func candidateCompatible(m storage.ModelAlias, req RequestRequirements) bool {
+	has := func(capability string) bool { return slices.Contains(m.Capabilities, capability) }
+	return (!req.Vision || has(provider.CapVision)) &&
+		(!req.Tools || has(provider.CapTools)) &&
+		(!req.JSONMode || has(provider.CapJSONMode)) &&
+		(!req.Embeddings || has(provider.CapEmbeddings)) &&
+		(!req.Audio || has(provider.CapAudio)) &&
+		(!req.Streaming || has(provider.CapStreaming)) &&
+		(req.RequiredContext <= 0 || m.MaxContext <= 0 || m.MaxContext >= req.RequiredContext)
+}
+
+func capabilityCompatible(m storage.ModelAlias, req RequestRequirements) bool {
+	req.RequiredContext = 0
+	return candidateCompatible(m, req)
+}
+
+// intelligentOrder filters and ranks candidates. Pool order is used only for
+// exact score ties.
+func (rt *routes) intelligentOrder(combo storage.Combo, req RequestRequirements) ([]string, error) {
+	candidates := make([]intelligentCandidate, 0, len(combo.Members))
+	capable := 0
+	for i, alias := range combo.Members {
+		m, ok := rt.models[alias]
+		if !ok || !capabilityCompatible(m, req) {
+			continue
+		}
+		capable++
+		// Zero means the context window is unknown, not zero. Keep the
+		// route eligible and let the upstream enforce its actual limit.
+		if req.RequiredContext > 0 && m.MaxContext > 0 && m.MaxContext < req.RequiredContext {
+			continue
+		}
+		candidates = append(candidates, intelligentCandidate{alias: alias, poolOrder: i})
+	}
+	if len(candidates) == 0 {
+		if capable > 0 {
+			return nil, ErrContextExceeded
+		}
+		return nil, ErrNoCompatibleModel
+	}
+	if rt.engine != nil {
+		rt.engine.scoreCandidates(rt, candidates)
+	}
+	slices.SortStableFunc(candidates, func(a, b intelligentCandidate) int {
+		if a.score > b.score {
+			return -1
+		}
+		if a.score < b.score {
+			return 1
+		}
+		return a.poolOrder - b.poolOrder
 	})
-
-	out := make([]string, 0, len(pool))
-	for _, entry := range pool {
-		out = append(out, entry.alias)
+	out := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		out = append(out, candidate.alias)
 	}
-	return out
+	return out, nil
 }
 
-// rankOf classifies a provider by current availability.
-func (e *Engine) rankOf(providerName string) int {
-	if !e.probes.healthy(providerName) {
-		return rankDown
+func (e *Engine) scoreCandidates(rt *routes, candidates []intelligentCandidate) {
+	minLatency, maxLatency := float64(intelligentBaselineMs), float64(intelligentBaselineMs)
+	minCost, maxCost := 0.0, 0.0
+	for _, candidate := range candidates {
+		m := rt.models[candidate.alias]
+		latency := float64(intelligentBaselineMs)
+		if stats, ok := e.stats.Alias(candidate.alias); ok && stats.P50Ms > 0 {
+			latency = float64(stats.P50Ms)
+		}
+		if latency < minLatency {
+			minLatency = latency
+		}
+		if latency > maxLatency {
+			maxLatency = latency
+		}
+		cost := m.Pricing.Input + m.Pricing.Output
+		if cost < minCost {
+			minCost = cost
+		}
+		if cost > maxCost {
+			maxCost = cost
+		}
 	}
-	switch e.breakers.phase(providerName) {
-	case CircuitClosed:
-		return rankReady
-	case CircuitHalfOpen:
-		return rankProbing
-	default:
-		return rankDown
+	for i := range candidates {
+		m := rt.models[candidates[i].alias]
+		health := 50.0
+		latency := float64(intelligentBaselineMs)
+		if stats, ok := e.stats.Alias(candidates[i].alias); ok {
+			health = stats.SuccessRate
+			if stats.P50Ms > 0 {
+				latency = float64(stats.P50Ms)
+			}
+		}
+		latencyScore := normalizeLower(latency, minLatency, maxLatency)
+		costScore := normalizeLower(m.Pricing.Input+m.Pricing.Output, minCost, maxCost)
+		candidates[i].score = float64(m.QualityTier)*0.35 + health*0.30 + latencyScore*0.20 + costScore*0.15
 	}
 }
 
-// scoreOf reduces an alias's rolling window to a number in [0, 1]: mostly how
-// often it answers, partly how fast. An unmeasured alias scores as unknown, and
-// a window too thin to trust is pulled towards neutral, so one unlucky request
-// cannot demote a route for long.
-func (e *Engine) scoreOf(alias string) float64 {
-	stats, ok := e.stats.Alias(alias)
-	if !ok || stats.Requests == 0 {
-		return unknownScore
+func normalizeLower(value, min, max float64) float64 {
+	if max <= min {
+		return 100
 	}
-
-	latency := float64(intelligentBaselineMs) / float64(intelligentBaselineMs+stats.P50Ms)
-	score := 0.7*(stats.SuccessRate/100) + 0.3*latency
-	if stats.Confidence == ConfidenceLow {
-		// Blend towards neutral: the window is real but thin, so it nudges the
-		// order instead of dictating it.
-		score = (score + neutralScore) / 2
-	}
-	return score
+	return (max - value) * 100 / (max - min)
 }

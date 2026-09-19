@@ -383,12 +383,15 @@ export type CapabilityInfo = {
 };
 
 export type ModelAlias = {
-  alias: string;
-  provider: string;
-  model: string;
-  fallback: string[];
-  capabilities: Capability[];
-};
+	alias: string;
+	provider: string;
+	model: string;
+	fallback: string[];
+	capabilities: Capability[];
+	max_context: number;
+	quality_tier: number;
+	pricing: { Input: number; Output: number };
+}
 
 export type ModelTestResult = {
   alias: string;
@@ -436,13 +439,14 @@ export type ProviderMetrics = {
 };
 
 export type CatalogModel = {
-  id: string;
-  owned_by?: string;
-  imported: boolean;
-  alias?: string;
-  /** What importing this model would tag it with. */
-  capabilities: Capability[];
-};
+	id: string;
+	owned_by?: string;
+	imported: boolean;
+	alias?: string;
+	context_window: number;
+	/** What importing this model would tag it with. */
+	capabilities: Capability[];
+}
 
 export type ImportModelsResult = {
   imported: ModelAlias[];

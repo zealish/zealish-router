@@ -546,6 +546,79 @@ func TestAdminProviderCatalogAndImport(t *testing.T) {
 	}
 }
 
+func TestAdminImportContextAndOverrides(t *testing.T) {
+	h, store, _ := newAdminServer(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[{"id":"new","context_length":8192},{"id":"existing","context_window":16384},{"id":"unknown-limit","max_context":4096},{"id":"gpt-5"}]}`))
+	}))
+	t.Cleanup(srv.Close)
+	if rec := adminRequest(t, h, http.MethodPut, "/api/v1/providers/acme",
+		`{"base_url":"`+srv.URL+`","enabled":true}`); rec.Code != http.StatusOK {
+		t.Fatalf("create provider: %d %s", rec.Code, rec.Body.String())
+	}
+	ctx := context.Background()
+	for _, model := range []storage.ModelAlias{
+		{Alias: "existing", Provider: "acme", Model: "existing", MaxContext: 32768,
+			QualityTier: 73, Pricing: storage.Pricing{Input: 1.5, Output: 3},
+			Capabilities: []string{"vision"}, Fallback: []string{"gpt-5"}},
+		{Alias: "unknown-limit", Provider: "acme", Model: "unknown-limit"},
+	} {
+		if err := store.Models().Put(ctx, model); err != nil {
+			t.Fatal(err)
+		}
+	}
+	catalogRec := adminRequest(t, h, http.MethodGet, "/api/v1/providers/acme/catalog", "")
+	if catalogRec.Code != http.StatusOK {
+		t.Fatalf("catalog: %d %s", catalogRec.Code, catalogRec.Body.String())
+	}
+	catalog := decodeJSON[[]catalogModelResponse](t, catalogRec)
+	if len(catalog) != 4 || catalog[0].ContextWindow != 8192 || catalog[3].ContextWindow != 0 {
+		t.Fatalf("catalog context metadata = %+v", catalog)
+	}
+	rec := adminRequest(t, h, http.MethodPost, "/api/v1/providers/acme/import",
+		`{"models":["new","existing","unknown-limit","gpt-5"],"overwrite":true}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("import: %d %s", rec.Code, rec.Body.String())
+	}
+	result := decodeJSON[importModelsResponse](t, rec)
+	if len(result.Imported) != 4 {
+		t.Fatalf("import result = %+v", result)
+	}
+	for alias, want := range map[string]int{"new": 8192, "existing": 32768, "unknown-limit": 4096, "gpt-5": 0} {
+		model, err := store.Models().Get(ctx, alias)
+		if err != nil || model.MaxContext != want {
+			t.Errorf("%s: model = %+v, error = %v, want context %d", alias, model, err, want)
+		}
+	}
+	existing, err := store.Models().Get(ctx, "existing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if existing.QualityTier != 73 || existing.Pricing != (storage.Pricing{Input: 1.5, Output: 3}) ||
+		!slices.Equal(existing.Capabilities, []string{"vision"}) || !slices.Equal(existing.Fallback, []string{"gpt-5"}) {
+		t.Errorf("overwrite discarded operator metadata: %+v", existing)
+	}
+}
+
+func TestAdminImportCatalogFailureDoesNotWriteAliases(t *testing.T) {
+	h, store, _ := newAdminServer(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":{"message":"bad key"}}`))
+	}))
+	t.Cleanup(srv.Close)
+	adminRequest(t, h, http.MethodPut, "/api/v1/providers/acme",
+		`{"base_url":"`+srv.URL+`","enabled":true}`)
+	rec := adminRequest(t, h, http.MethodPost, "/api/v1/providers/acme/import", `{"models":["gpt-5"]}`)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("import: %d %s, want 502", rec.Code, rec.Body.String())
+	}
+	models, err := store.Models().List(context.Background())
+	if err != nil || len(models) != 0 {
+		t.Fatalf("failed import wrote aliases: %+v, error = %v", models, err)
+	}
+}
+
 // Two providers advertising the same upstream model must not collide: each
 // provider's configured alias prefix namespaces its imports.
 func TestAdminImportUsesProviderAliasPrefix(t *testing.T) {

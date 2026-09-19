@@ -14,9 +14,22 @@ const maxModelsBody = 4 << 20
 
 // Model is one entry of an upstream's GET /models catalogue.
 type Model struct {
-	ID      string `json:"id"`
-	OwnedBy string `json:"owned_by,omitempty"`
-	Created int64  `json:"created,omitempty"`
+	ID            string `json:"id"`
+	OwnedBy       string `json:"owned_by,omitempty"`
+	Created       int64  `json:"created,omitempty"`
+	ContextLength int    `json:"context_length,omitempty"`
+	ContextWindow int    `json:"context_window,omitempty"`
+	MaxContext    int    `json:"max_context,omitempty"`
+}
+
+// Context returns the first positive context-window value advertised by the upstream.
+func (m Model) Context() int {
+	for _, value := range []int{m.ContextLength, m.ContextWindow, m.MaxContext} {
+		if value > 0 {
+			return value
+		}
+	}
+	return 0
 }
 
 // ModelLister is implemented by providers that can enumerate their catalogue.

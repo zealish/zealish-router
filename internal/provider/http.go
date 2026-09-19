@@ -248,12 +248,22 @@ func (p *httpProvider) transportError(_ context.Context, err error) error {
 func (p *httpProvider) statusError(resp *http.Response) error {
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
 
+	var envelope openai.ErrorResponse
+	_ = json.Unmarshal(raw, &envelope)
+	code := strings.ToUpper(strings.TrimSpace(envelope.Error.Code))
+	message := envelope.Error.Message
+	if message == "" {
+		message = strings.TrimSpace(string(raw))
+	}
 	e := &Error{
 		Provider: p.opts.Name,
 		Status:   resp.StatusCode,
-		Message:  redact(p.opts.APIKey, upstreamMessage(raw)),
+		Message:  redact(p.opts.APIKey, message),
+		Code:     code,
 	}
 	switch {
+	case code == "CONTEXT_LIMIT_EXCEEDED" || strings.Contains(strings.ToUpper(message), "CONTEXT_LIMIT_EXCEEDED"):
+		e.Kind = ErrContextExceeded
 	case resp.StatusCode == http.StatusRequestTimeout, resp.StatusCode == http.StatusGatewayTimeout:
 		e.Kind = ErrTimeout
 	case resp.StatusCode == http.StatusTooManyRequests:

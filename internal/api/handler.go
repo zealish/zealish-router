@@ -204,13 +204,17 @@ func (h *handler) streamCompletion(w http.ResponseWriter, r *http.Request, req *
 
 func (h *handler) writeEngineError(w http.ResponseWriter, r *http.Request, err error) {
 	var upstream *provider.Error
-
 	switch {
+	case errors.Is(err, router.ErrNoCompatibleModel), errors.Is(err, router.ErrContextExceeded):
+		writeGatewayError(w, r, http.StatusBadRequest, "invalid_request_error", err.Error())
+	case errors.Is(err, router.ErrNoHealthyModel):
+		writeGatewayError(w, r, http.StatusBadGateway, "api_error", err.Error())
 	case errors.Is(err, router.ErrUnknownModel):
 		writeGatewayError(w, r, http.StatusNotFound, "invalid_request_error", err.Error())
 	case errors.Is(err, provider.ErrNotFound):
 		writeGatewayError(w, r, http.StatusNotFound, "invalid_request_error", err.Error())
 	case errors.Is(err, context.Canceled):
+		return
 		// Client hung up; nothing useful left to write.
 		return
 	case errors.Is(err, provider.ErrUnsupported):

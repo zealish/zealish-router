@@ -236,18 +236,14 @@ func (e *Engine) Capabilities(name string) []string {
 	return provider.NormalizeCapabilities(union)
 }
 
-// Chain returns the deterministic attempt order for a model name: for an alias
-// the alias itself followed by its configured fallbacks, for a combo its
-// members in strategy order, each followed by its own fallbacks. Duplicates
-// are removed and the total length capped.
+// Chain returns the deterministic attempt order for a model name.
 func (e *Engine) Chain(name string) []string {
-	return e.routes.Load().chain(name)
+	return e.routes.Load().chain(name, RequestRequirements{})
 }
 
-func (rt *routes) chain(name string) []string {
+func (rt *routes) chain(name string, req RequestRequirements) []string {
 	chain := make([]string, 0, maxChainAttempts)
 	seen := make(map[string]struct{}, maxChainAttempts)
-
 	appendCandidate := func(candidate string) bool {
 		if _, dup := seen[candidate]; dup {
 			return true
@@ -257,11 +253,21 @@ func (rt *routes) chain(name string) []string {
 		return len(chain) < maxChainAttempts
 	}
 
-	for _, member := range rt.entrypoints(name) {
+	entrypoints, err := rt.entrypoints(name, req)
+	if err != nil {
+		return nil
+	}
+	for _, member := range entrypoints {
 		if !appendCandidate(member) {
 			return chain
 		}
 		for _, fallback := range rt.models[member].Fallback {
+			if combo, ok := rt.combos[name]; ok && combo.Strategy == storage.ComboIntelligent {
+				m, exists := rt.models[fallback]
+				if !exists || !candidateCompatible(m, req) {
+					continue
+				}
+			}
 			if !appendCandidate(fallback) {
 				return chain
 			}
@@ -270,31 +276,24 @@ func (rt *routes) chain(name string) []string {
 	return chain
 }
 
-// entrypoints lists the routes a name starts from: one for a plain alias, the
-// combo pool in strategy order for a combo.
-func (rt *routes) entrypoints(name string) []string {
+// entrypoints lists the routes a name starts from.
+func (rt *routes) entrypoints(name string, req RequestRequirements) ([]string, error) {
 	combo, ok := rt.combos[name]
 	if !ok {
-		return []string{name}
+		return []string{name}, nil
 	}
-
 	switch combo.Strategy {
 	case storage.ComboRoundRobin:
-		// Round-robin only moves the starting point: the rest of the pool
-		// still follows in order, so a busy member is skipped rather than
-		// retried.
-		return rotate(combo.Members, int(rt.cursors[name].Add(1)-1)%len(combo.Members))
+		return rotate(combo.Members, int(rt.cursors[name].Add(1)-1)%len(combo.Members)), nil
 	case storage.ComboWeighted:
-		return rotate(combo.Members, weightedPick(combo.Members, combo.Weights, rt.cursors[name].Add(1)-1))
+		return rotate(combo.Members, weightedPick(combo.Members, combo.Weights, rt.cursors[name].Add(1)-1)), nil
 	case storage.ComboIntelligent:
-		return rt.intelligentOrder(combo, rt.cursors[name].Add(1)-1)
+		return rt.intelligentOrder(combo, req)
 	default:
-		return combo.Members
+		return combo.Members, nil
 	}
 }
 
-// rotate returns members starting at index start, wrapping around, so the rest
-// of the pool stays available as fallback.
 func rotate(members []string, start int) []string {
 	n := len(members)
 	ordered := make([]string, 0, n)
@@ -304,16 +303,11 @@ func rotate(members []string, start int) []string {
 	return ordered
 }
 
-// weightedPick chooses a starting member for tick: the cursor walks a cycle of
-// total-weight slots, so over each cycle a member starts exactly as often as
-// its weight. A missing or non-positive weight counts as one, so a
-// half-configured pool still spreads traffic.
 func weightedPick(members []string, weights []int, tick uint64) int {
 	total := 0
 	for i := range members {
 		total += weightAt(weights, i)
 	}
-
 	offset := int(tick % uint64(total))
 	for i := range members {
 		offset -= weightAt(weights, i)
@@ -333,12 +327,14 @@ func weightAt(weights []int, i int) int {
 
 // ChatCompletion routes a non-streaming completion request, advancing through
 // the fallback chain on retryable upstream failures.
+// ChatCompletion routes a non-streaming completion request, advancing through
+// the fallback chain on retryable upstream failures.
 func (e *Engine) ChatCompletion(ctx context.Context, req *openai.ChatCompletionRequest) (*openai.ChatCompletionResponse, error) {
 	meta := beginRequest(ctx, req.Model, false)
-	return dispatch(ctx, e, req.Model, false, meta, func(callCtx context.Context, _ measured, p provider.Provider, route Route) (*openai.ChatCompletionResponse, error) {
+	requirements := analyzeChatRequest(req)
+	return dispatch(ctx, e, req.Model, false, requirements, meta, func(callCtx context.Context, _ measured, p provider.Provider, route Route) (*openai.ChatCompletionResponse, error) {
 		upstream := *req
 		upstream.Model = route.Model
-
 		resp, err := p.ChatCompletion(callCtx, &upstream)
 		if err != nil {
 			return nil, err
@@ -346,17 +342,16 @@ func (e *Engine) ChatCompletion(ctx context.Context, req *openai.ChatCompletionR
 		e.recordUsage(route, usageOf(resp.Usage, &upstream, resp.Choices), false, meta)
 		return resp, nil
 	})
+
 }
 
-// ChatCompletionStream routes a streaming completion request. Fallback applies
-// only while establishing the stream: once the channel is handed back the first
-// chunk may already be in flight, so the response is committed.
+// ChatCompletionStream routes a streaming completion request. Fallback applies only while establishing the stream.
 func (e *Engine) ChatCompletionStream(ctx context.Context, req *openai.ChatCompletionRequest) (<-chan openai.StreamChunk, error) {
 	meta := beginRequest(ctx, req.Model, true)
-	return dispatch(ctx, e, req.Model, true, meta, func(callCtx context.Context, m measured, p provider.Provider, route Route) (<-chan openai.StreamChunk, error) {
+	requirements := analyzeChatRequest(req)
+	return dispatch(ctx, e, req.Model, true, requirements, meta, func(callCtx context.Context, m measured, p provider.Provider, route Route) (<-chan openai.StreamChunk, error) {
 		upstream := *req
 		upstream.Model = route.Model
-
 		chunks, err := p.ChatCompletionStream(callCtx, &upstream)
 		if err != nil {
 			return nil, err
@@ -365,14 +360,13 @@ func (e *Engine) ChatCompletionStream(ctx context.Context, req *openai.ChatCompl
 	})
 }
 
-// Embeddings routes an embeddings request through the same alias, fallback and
-// retry machinery as a completion. There is no streaming variant.
+// Embeddings routes an embeddings request through the same alias and fallback machinery.
 func (e *Engine) Embeddings(ctx context.Context, req *openai.EmbeddingRequest) (*openai.EmbeddingResponse, error) {
 	meta := beginRequest(ctx, req.Model, false)
-	return dispatch(ctx, e, req.Model, false, meta, func(callCtx context.Context, _ measured, p provider.Provider, route Route) (*openai.EmbeddingResponse, error) {
+	requirements := analyzeEmbeddingRequest(req)
+	return dispatch(ctx, e, req.Model, false, requirements, meta, func(callCtx context.Context, _ measured, p provider.Provider, route Route) (*openai.EmbeddingResponse, error) {
 		upstream := *req
 		upstream.Model = route.Model
-
 		resp, err := p.Embeddings(callCtx, &upstream)
 		if err != nil {
 			return nil, err
@@ -382,26 +376,26 @@ func (e *Engine) Embeddings(ctx context.Context, req *openai.EmbeddingRequest) (
 	})
 }
 
-// dispatch walks the fallback chain for req.Model, retrying each provider
-// according to the engine policy, and returns the first successful result.
-// A request that fails after reaching at least one provider is appended to the
-// usage log with its failure class so totals count every hit on a model.
-func dispatch[T any](ctx context.Context, e *Engine, model string, streamed bool, meta callMeta, call func(context.Context, measured, provider.Provider, Route) (T, error)) (T, error) {
+// dispatch walks the request-aware fallback chain, retrying transient failures.
+func dispatch[T any](ctx context.Context, e *Engine, model string, streamed bool, requirements RequestRequirements, meta callMeta, call func(context.Context, measured, provider.Provider, Route) (T, error)) (T, error) {
 	var zero T
-
-	// Pin one snapshot for the whole walk: a reload mid-chain must not move
-	// the aliases out from under this request.
 	rt := e.routes.Load()
-	chain := rt.chain(model)
+	chain := rt.chain(model, requirements)
+	if len(chain) == 0 {
+		if combo, ok := rt.combos[model]; ok && combo.Strategy == storage.ComboIntelligent {
+			_, err := rt.intelligentOrder(combo, requirements)
+			if err != nil {
+				e.finishTrace(meta.trace, classify(err))
+				return zero, err
+			}
+		}
+		return zero, fmt.Errorf("%w: %s", ErrUnknownModel, model)
+	}
 	var lastErr error
 	var lastRoute Route
 	attempted := false
-
 	for i, alias := range chain {
-		// Every route after the first is reached by falling back off the one
-		// before it, whatever made that one fail.
 		fallback := i > 0
-
 		p, route, err := rt.pick(alias)
 		if err != nil {
 			if alias == model {
@@ -484,6 +478,9 @@ func dispatch[T any](ctx context.Context, e *Engine, model string, streamed bool
 		e.recordFailure(lastRoute, streamed, classify(lastErr), meta)
 	}
 	e.finishTrace(meta.trace, classify(lastErr))
+	if combo, ok := rt.combos[model]; ok && combo.Strategy == storage.ComboIntelligent {
+		return zero, fmt.Errorf("%w: %w", ErrNoHealthyModel, lastErr)
+	}
 	return zero, fmt.Errorf("%w: %w", ErrChainExhausted, lastErr)
 }
 

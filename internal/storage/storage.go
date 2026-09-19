@@ -61,6 +61,12 @@ type Provider struct {
 	BreakerCooldown *time.Duration
 }
 
+// Pricing contains static USD prices per million tokens.
+type Pricing struct {
+	Input  float64
+	Output float64
+}
+
 // ModelAlias maps a client-facing alias onto a provider model, with an
 // ordered fallback chain of other aliases.
 type ModelAlias struct {
@@ -73,6 +79,12 @@ type ModelAlias struct {
 	// import and editable afterwards, so a custom provider is never stuck with
 	// a guess. Empty means the alias has not been classified.
 	Capabilities []string
+	// MaxContext is the model context window in tokens. Zero means unknown,
+	// including for aliases created before this metadata was introduced.
+	MaxContext int
+	// QualityTier is a 0..100 static quality score. Zero means unclassified.
+	QualityTier int
+	Pricing     Pricing
 }
 
 // ComboStrategy selects how a combo picks the order of its member aliases.

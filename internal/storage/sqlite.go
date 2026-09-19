@@ -525,7 +525,7 @@ type sqliteModels struct {
 
 func (s *sqliteModels) List(ctx context.Context) ([]ModelAlias, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT alias, provider, model, fallback, capabilities FROM model_aliases ORDER BY alias`)
+		`SELECT alias, provider, model, fallback, capabilities, max_context, quality_tier, price_input, price_output FROM model_aliases ORDER BY alias`)
 	if err != nil {
 		return nil, fmt.Errorf("storage: list model aliases: %w", err)
 	}
@@ -547,7 +547,7 @@ func (s *sqliteModels) List(ctx context.Context) ([]ModelAlias, error) {
 
 func (s *sqliteModels) Get(ctx context.Context, alias string) (ModelAlias, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT alias, provider, model, fallback, capabilities FROM model_aliases WHERE alias = ?`, alias)
+		`SELECT alias, provider, model, fallback, capabilities, max_context, quality_tier, price_input, price_output FROM model_aliases WHERE alias = ?`, alias)
 
 	m, err := scanModelAlias(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -561,14 +561,19 @@ func (s *sqliteModels) Get(ctx context.Context, alias string) (ModelAlias, error
 
 func (s *sqliteModels) Put(ctx context.Context, m ModelAlias) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO model_aliases (alias, provider, model, fallback, capabilities)
-		 VALUES (?, ?, ?, ?, ?)
+		`INSERT INTO model_aliases (alias, provider, model, fallback, capabilities, max_context, quality_tier, price_input, price_output)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(alias) DO UPDATE SET
 		   provider = excluded.provider,
 		   model = excluded.model,
 		   fallback = excluded.fallback,
-		   capabilities = excluded.capabilities`,
-		m.Alias, m.Provider, m.Model, encodeFallback(m.Fallback), encodeFallback(m.Capabilities))
+		   capabilities = excluded.capabilities,
+		   max_context = excluded.max_context,
+		   quality_tier = excluded.quality_tier,
+		   price_input = excluded.price_input,
+		   price_output = excluded.price_output`,
+		m.Alias, m.Provider, m.Model, encodeFallback(m.Fallback), encodeFallback(m.Capabilities),
+		m.MaxContext, m.QualityTier, m.Pricing.Input, m.Pricing.Output)
 	if err != nil {
 		return fmt.Errorf("storage: put model alias: %w", err)
 	}
@@ -589,7 +594,8 @@ func scanModelAlias(src scanner) (ModelAlias, error) {
 		fallback     string
 		capabilities string
 	)
-	if err := src.Scan(&m.Alias, &m.Provider, &m.Model, &fallback, &capabilities); err != nil {
+	if err := src.Scan(&m.Alias, &m.Provider, &m.Model, &fallback, &capabilities,
+		&m.MaxContext, &m.QualityTier, &m.Pricing.Input, &m.Pricing.Output); err != nil {
 		return ModelAlias{}, err
 	}
 	m.Fallback = decodeFallback(fallback)

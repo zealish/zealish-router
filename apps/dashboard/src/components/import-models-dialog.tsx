@@ -228,6 +228,11 @@ function ImportModelsBody({
                         → {prefix + m.id}
                       </span>
                       <CapabilityBadges capabilities={m.capabilities} compact />
+                      <span className="text-muted-foreground whitespace-nowrap text-xs tabular-nums">
+                        {m.context_window > 0
+                          ? `${m.context_window.toLocaleString()} tokens`
+                          : "context unknown"}
+                      </span>
                       {m.imported ? (
                         <Badge variant="secondary">{m.alias}</Badge>
                       ) : null}

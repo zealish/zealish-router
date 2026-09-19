@@ -205,23 +205,22 @@ func intelligentCombo(members ...string) storage.Combo {
 	}
 }
 
-// With no history every member scores neutral, so the pool keeps rotating:
-// a cold combo explores instead of pinning traffic on its first member.
-func TestComboIntelligentRotatesWithoutHistory(t *testing.T) {
+// With no history every member has the same score, so pool order is the
+// deterministic tie-breaker.
+func TestComboIntelligentUsesPoolOrderOnEqualScores(t *testing.T) {
 	e := newComboEngine(t, intelligentCombo("gpt-5", "fast", "local"),
 		&fakeProvider{name: "openai"},
 		&fakeProvider{name: "openrouter"},
 		&fakeProvider{name: "ollama"},
 	)
 
-	want := []string{"openai", "openrouter", "ollama"}
-	for i, served := range want {
+	for i := range 3 {
 		resp, err := e.ChatCompletion(context.Background(), &openai.ChatCompletionRequest{Model: "code-agent"})
 		if err != nil {
 			t.Fatalf("request %d: %v", i, err)
 		}
-		if resp.ID != served {
-			t.Errorf("request %d served by %q, want %q", i, resp.ID, served)
+		if resp.ID != "openai" {
+			t.Errorf("request %d served by %q, want pool-first openai", i, resp.ID)
 		}
 	}
 }
@@ -295,6 +294,25 @@ func TestComboIntelligentDemotesAnOpenCircuit(t *testing.T) {
 	}
 	if resp.ID != "openrouter" {
 		t.Errorf("served by %q, want openrouter: openai's circuit is open", resp.ID)
+	}
+}
+
+func TestComboIntelligentFallsBackOnContextExceeded(t *testing.T) {
+	primary := &fakeProvider{name: "openai", results: []error{
+		&provider.Error{Provider: "openai", Status: 400, Kind: provider.ErrContextExceeded, Message: "context window exceeded"},
+	}}
+	secondary := &fakeProvider{name: "openrouter"}
+	e := newComboEngine(t, intelligentCombo("gpt-5", "fast"), primary, secondary)
+
+	resp, err := e.ChatCompletion(context.Background(), &openai.ChatCompletionRequest{
+		Model:    "code-agent",
+		Messages: []openai.Message{{Role: "user", Content: []byte(`"large prompt"`)}},
+	})
+	if err != nil {
+		t.Fatalf("ChatCompletion: %v", err)
+	}
+	if resp.ID != "openrouter" {
+		t.Fatalf("served by %q, want fallback openrouter", resp.ID)
 	}
 }
 

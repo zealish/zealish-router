@@ -15,6 +15,10 @@ var (
 	ErrRateLimited = errors.New("provider: rate limited")
 	// ErrUpstream5xx marks an upstream 5xx response.
 	ErrUpstream5xx = errors.New("provider: upstream server error")
+	// ErrContextExceeded marks an upstream request rejected because the model
+	// cannot fit the supplied context. Intelligent routing may try another
+	// member with a larger window.
+	ErrContextExceeded = errors.New("provider: context limit exceeded")
 	// ErrConnection marks a transport-level failure before a response arrived.
 	ErrConnection = errors.New("provider: connection error")
 )
@@ -25,12 +29,14 @@ var (
 var ErrUnsupported = errors.New("provider: endpoint not supported")
 
 // Error carries the upstream context of a failed provider call. Kind, when set,
-// is one of the retryable sentinels above.
+// is one of the retryable sentinels above. Code preserves a provider error code
+// such as CONTEXT_LIMIT_EXCEEDED for routing decisions.
 type Error struct {
 	Provider string
 	Status   int
 	Kind     error
 	Message  string
+	Code     string
 }
 
 func (e *Error) Error() string {
@@ -55,7 +61,8 @@ func Retryable(err error) bool {
 	return errors.Is(err, ErrTimeout) ||
 		errors.Is(err, ErrRateLimited) ||
 		errors.Is(err, ErrUpstream5xx) ||
-		errors.Is(err, ErrConnection)
+		errors.Is(err, ErrConnection) ||
+		errors.Is(err, ErrContextExceeded)
 }
 
 // redactionPlaceholder replaces a secret in text bound for logs or clients.

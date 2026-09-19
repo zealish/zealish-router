@@ -96,10 +96,11 @@ function latencyTone(ms: number | null): string {
 }
 
 type Draft = {
-  alias: string;
-  model: string;
-  fallback: string;
-  capabilities: Capability[];
+	alias: string;
+	model: string;
+	fallback: string;
+	capabilities: Capability[];
+	max_context: number;
 };
 
 /**
@@ -158,8 +159,15 @@ export default function ProviderDetailPage() {
 
   const save = async () => {
     if (!draft) return;
+    if (!Number.isSafeInteger(draft.max_context) || draft.max_context < 0) {
+      toast.error("Context limit must be a nonnegative integer.");
+      return;
+    }
     setSaving(true);
     try {
+      const existing = editing
+        ? data?.find((model) => model.alias === draft.alias)
+        : undefined;
       await api.put(`/models/${encodeURIComponent(draft.alias)}`, {
         provider: name,
         model: draft.model,
@@ -168,6 +176,9 @@ export default function ProviderDetailPage() {
           .map((s) => s.trim())
           .filter(Boolean),
         capabilities: draft.capabilities,
+        max_context: draft.max_context,
+        quality_tier: existing?.quality_tier ?? 0,
+        pricing: existing?.pricing ?? { Input: 0, Output: 0 },
       });
       toast.success(`Saved alias '${draft.alias}'.`);
       setDraft(undefined);
@@ -285,6 +296,19 @@ export default function ProviderDetailPage() {
           </div>
         ),
     },
+	{
+		accessorKey: "max_context",
+		header: ({ column }) => (
+			<DataTableColumnHeader column={column} title="Context" />
+		),
+		cell: ({ row }) => (
+			<span className="text-xs">
+				{row.original.max_context > 0
+					? `${row.original.max_context.toLocaleString()} tokens`
+					: "unknown"}
+			</span>
+		),
+	},
     {
       id: "capabilities",
       accessorFn: (model) => model.capabilities.join(", "),
@@ -421,6 +445,7 @@ export default function ProviderDetailPage() {
                 model: row.original.model,
                 fallback: row.original.fallback.join(", "),
                 capabilities: row.original.capabilities,
+                max_context: row.original.max_context,
               });
               setEditing(true);
             }}
@@ -476,6 +501,7 @@ export default function ProviderDetailPage() {
                   // The conservative baseline every chat upstream serves; the
                   // operator ticks the rest.
                   capabilities: ["chat", "streaming"],
+                  max_context: 0,
                 });
                 setEditing(false);
               }}
@@ -647,6 +673,25 @@ export default function ProviderDetailPage() {
                     setDraft({ ...draft, model: e.target.value })
                   }
                 />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="max-context">Context limit (tokens)</Label>
+                <Input
+                  id="max-context"
+                  type="number"
+                  min={0}
+                  max={Number.MAX_SAFE_INTEGER}
+                  step={1}
+                  required
+                  value={Number.isNaN(draft.max_context) ? "" : draft.max_context}
+                  onChange={(e) =>
+                    setDraft({ ...draft, max_context: e.target.valueAsNumber })
+                  }
+                  aria-describedby="max-context-help"
+                />
+                <p id="max-context-help" className="text-muted-foreground text-xs">
+                  Use 0 when the context limit is unknown.
+                </p>
               </div>
               <div className="space-y-2">
                 <Label htmlFor="fallback">Fallback aliases</Label>
