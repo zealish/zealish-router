@@ -11,7 +11,6 @@ import (
 
 	"github.com/zealish/zealish-router/internal/auth"
 	"github.com/zealish/zealish-router/internal/cache"
-	"github.com/zealish/zealish-router/internal/extension"
 	"github.com/zealish/zealish-router/internal/metrics"
 	"github.com/zealish/zealish-router/internal/provider"
 	"github.com/zealish/zealish-router/internal/router"
@@ -20,12 +19,11 @@ import (
 )
 
 type handler struct {
-	engine     *router.Engine
-	extensions *extension.Registry
-	metrics    *metrics.Metrics
-	cache      *cache.Cache
-	logger     *slog.Logger
-	active     *activeRequests
+	engine  *router.Engine
+	metrics *metrics.Metrics
+	cache   *cache.Cache
+	logger  *slog.Logger
+	active  *activeRequests
 }
 
 func newHandler(deps Dependencies, trackers ...*activeRequests) *handler {
@@ -33,7 +31,7 @@ func newHandler(deps Dependencies, trackers ...*activeRequests) *handler {
 	if len(trackers) > 0 && trackers[0] != nil {
 		active = trackers[0]
 	}
-	return &handler{engine: deps.Engine, extensions: deps.Extensions, metrics: deps.Metrics, cache: deps.Cache, logger: deps.Logger, active: active}
+	return &handler{engine: deps.Engine, metrics: deps.Metrics, cache: deps.Cache, logger: deps.Logger, active: active}
 }
 
 func (h *handler) trackActive(r *http.Request, model string) func() {
@@ -48,14 +46,6 @@ func (h *handler) trackActive(r *http.Request, model string) func() {
 	}
 	h.active.add(activeRequest{RequestID: id, APIKey: key, Model: model, StartedAt: time.Now().UTC()})
 	return func() { h.active.remove(id) }
-}
-
-// applyExtensions runs the enabled request extensions (sanitization, RTK)
-// over the messages before the request reaches routing or the cache key.
-func (h *handler) applyExtensions(req *openai.ChatCompletionRequest) {
-	if h.extensions != nil {
-		h.extensions.Apply(req)
-	}
 }
 
 func (h *handler) health(w http.ResponseWriter, _ *http.Request) {
@@ -117,7 +107,6 @@ func (h *handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	cleanup := h.trackActive(r, req.Model)
 	defer cleanup()
-	h.applyExtensions(&req)
 	if req.Stream {
 		w.Header().Set(cacheHeader, headerPass)
 		h.streamCompletion(w, r, &req)

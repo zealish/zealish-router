@@ -16,7 +16,6 @@ import (
 
 	"github.com/zealish/zealish-router/internal/auth"
 	"github.com/zealish/zealish-router/internal/cache"
-	"github.com/zealish/zealish-router/internal/extension"
 	"github.com/zealish/zealish-router/internal/metrics"
 	"github.com/zealish/zealish-router/internal/provider"
 	"github.com/zealish/zealish-router/internal/router"
@@ -28,21 +27,20 @@ import (
 // configuration: every mutation writes to storage and then republishes the
 // engine's routing table, so the database stays the single source of truth.
 type adminHandler struct {
-	store      storage.Store
-	loader     *router.Loader
-	engine     *router.Engine
-	metrics    *metrics.Metrics
-	quota      *auth.Quota
-	cache      *cache.Cache
-	extensions *extension.Registry
-	logger     *slog.Logger
-	active     *activeRequests
+	store   storage.Store
+	loader  *router.Loader
+	engine  *router.Engine
+	metrics *metrics.Metrics
+	quota   *auth.Quota
+	cache   *cache.Cache
+	logger  *slog.Logger
+	active  *activeRequests
 }
 
 func newAdminHandler(deps Dependencies, active *activeRequests) *adminHandler {
 	return &adminHandler{
 		store: deps.Store, loader: deps.Loader, engine: deps.Engine, metrics: deps.Metrics,
-		quota: deps.Quota, cache: deps.Cache, extensions: deps.Extensions, logger: deps.Logger, active: active,
+		quota: deps.Quota, cache: deps.Cache, logger: deps.Logger, active: active,
 	}
 }
 
@@ -89,9 +87,6 @@ func (h *adminHandler) routes(r chi.Router) {
 
 	r.Get("/cache", h.cacheStats)
 	r.Delete("/cache", h.purgeCache)
-
-	r.Get("/extensions", h.listExtensions)
-	r.Put("/extensions/{id}", h.putExtension)
 
 	r.Get("/settings", h.listSettings)
 	r.Put("/settings", h.putSettings)
@@ -1762,43 +1757,6 @@ func (h *adminHandler) usageByKey(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, out)
-}
-
-// --- extensions ---
-
-// extensionRequest updates one extension's enabled flag and configuration.
-type extensionRequest struct {
-	Enabled bool            `json:"enabled"`
-	Config  json.RawMessage `json:"config,omitempty"`
-}
-
-func (h *adminHandler) listExtensions(w http.ResponseWriter, _ *http.Request) {
-	if h.extensions == nil {
-		writeJSON(w, http.StatusOK, []extension.Info{})
-		return
-	}
-	writeJSON(w, http.StatusOK, h.extensions.List())
-}
-
-func (h *adminHandler) putExtension(w http.ResponseWriter, r *http.Request) {
-	if h.extensions == nil {
-		writeError(w, http.StatusNotFound, "invalid_request_error", "Extensions are disabled on this server.")
-		return
-	}
-	var req extensionRequest
-	if !decodeBody(w, r, &req) {
-		return
-	}
-	id := urlParam(r, "id")
-	if err := h.extensions.Update(r.Context(), id, req.Enabled, req.Config); err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "invalid_request_error", "Unknown extension: "+id+".")
-			return
-		}
-		writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, h.extensions.List())
 }
 
 // --- settings ---

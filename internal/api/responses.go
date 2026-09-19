@@ -69,7 +69,6 @@ func (h *handler) responses(w http.ResponseWriter, r *http.Request) {
 	// Routing is dialect-agnostic, but the trace records which dialect the
 	// client spoke so the dashboard can separate the populations.
 	r = r.WithContext(router.WithDialect(r.Context(), storage.DialectResponses))
-	h.applyExtensions(converted)
 
 	if req.Stream {
 		w.Header().Set(cacheHeader, headerPass)

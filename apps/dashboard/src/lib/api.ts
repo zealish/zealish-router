@@ -463,34 +463,6 @@ export type CacheStats = {
   hit_rate: number;
 };
 
-/** Lifetime effect of one extension, mirroring extension.Stats. */
-export type ExtensionStats = {
-  messages_rewritten: number;
-  bytes_saved: number;
-  tokens_saved: number;
-};
-
-/** One request extension, served by /extensions. */
-export type Extension = {
-  id: string;
-  name: string;
-  description: string;
-  enabled: boolean;
-  config: Record<string, unknown>;
-  stats: ExtensionStats;
-};
-
-/** Config of the "sanitize" extension, mirroring extension.SanitizeConfig. */
-export type SanitizeConfig = {
-  trim_whitespace: boolean;
-  history_window: number;
-  dedup_messages: boolean;
-};
-
-export type ExtensionInput = {
-  enabled: boolean;
-  config?: Record<string, unknown>;
-};
 
 export type Settings = Record<string, string>;
 
