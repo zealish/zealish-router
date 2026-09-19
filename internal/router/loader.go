@@ -97,10 +97,12 @@ func NewProviderClient(rec storage.Provider, pool *ProxyPool) provider.Provider 
 		}
 	}
 	opts := provider.Options{
-		Name:       rec.Name,
-		BaseURL:    rec.BaseURL,
-		APIKey:     rec.APIKey,
-		HTTPClient: client,
+		Name:         rec.Name,
+		BaseURL:      rec.BaseURL,
+		APIKey:       rec.APIKey,
+		APIKeys:      rec.APIKeys,
+		APIKeyMethod: rec.APIKeyMethod,
+		HTTPClient:   client,
 	}
 	if rec.Name == "commandcode" || rec.CatalogID == "commandcode" {
 		return provider.NewCommandCode(opts)
@@ -108,6 +110,9 @@ func NewProviderClient(rec storage.Provider, pool *ProxyPool) provider.Provider 
 	if rec.Group == string(provider.GroupOAuth) {
 		opts.AuthHeader = "Authorization"
 		opts.APIKey = bearer(rec.APIKey)
+		for i, key := range opts.APIKeys {
+			opts.APIKeys[i] = bearer(key)
+		}
 	}
 	if provider.NormalizeKind(rec.Kind) == provider.KindAnthropic {
 		return provider.NewAnthropic(opts)

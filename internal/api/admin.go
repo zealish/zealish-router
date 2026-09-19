@@ -78,8 +78,8 @@ func (h *adminHandler) routes(r chi.Router) {
 
 	r.Get("/combos", h.listCombos)
 	r.Put("/combos/{name}", h.putCombo)
+	r.Post("/combos/{name}/rename", h.renameCombo)
 	r.Delete("/combos/{name}", h.deleteCombo)
-
 	r.Get("/proxies", h.listProxies)
 	r.Put("/proxies/{name}", h.putProxy)
 	r.Post("/proxies/import", h.importProxies)
@@ -431,56 +431,48 @@ func toAPIKeyResponse(k storage.APIKey) apiKeyResponse {
 // --- providers ---
 
 type providerResponse struct {
-	Name         string `json:"name"`
-	Group        string `json:"group"`
-	CatalogID    string `json:"catalog_id,omitempty"`
-	Kind         string `json:"kind"`
-	BaseURL      string `json:"base_url"`
-	HasAPIKey    bool   `json:"has_api_key"`
-	TimeoutMS    int64  `json:"timeout_ms"`
-	Enabled      bool   `json:"enabled"`
-	AliasPrefix  string `json:"alias_prefix"`
-	UseProxyPool bool   `json:"use_proxy_pool"`
-
-	// Circuit reports the breaker phase: "closed", "open" or "half_open".
-	// A provider the engine has never called reports "closed".
-	Circuit string `json:"circuit"`
-	// CircuitRetryAt is when the next probe is admitted, set only while open.
-	CircuitRetryAt string `json:"circuit_retry_at,omitempty"`
-	// BreakerThreshold and BreakerCooldownMS are the per-provider overrides.
-	// Null means the provider inherits the policy from config.yaml.
+	Name              string `json:"name"`
+	Group             string `json:"group"`
+	CatalogID         string `json:"catalog_id,omitempty"`
+	Kind              string `json:"kind"`
+	BaseURL           string `json:"base_url"`
+	HasAPIKey         bool   `json:"has_api_key"`
+	APIKeyCount       int    `json:"api_key_count"`
+	APIKeyMethod      string `json:"api_key_method"`
+	TimeoutMS         int64  `json:"timeout_ms"`
+	Enabled           bool   `json:"enabled"`
+	AliasPrefix       string `json:"alias_prefix"`
+	UseProxyPool      bool   `json:"use_proxy_pool"`
+	Circuit           string `json:"circuit"`
+	CircuitRetryAt    string `json:"circuit_retry_at,omitempty"`
 	BreakerThreshold  *int   `json:"breaker_threshold"`
 	BreakerCooldownMS *int64 `json:"breaker_cooldown_ms"`
 }
 
 type providerRequest struct {
-	Group        string `json:"group"`
-	CatalogID    string `json:"catalog_id"`
-	Kind         string `json:"kind"`
-	BaseURL      string `json:"base_url"`
-	APIKey       string `json:"api_key"`
-	TimeoutMS    int64  `json:"timeout_ms"`
-	Enabled      bool   `json:"enabled"`
-	AliasPrefix  string `json:"alias_prefix"`
-	UseProxyPool bool   `json:"use_proxy_pool"`
-	// Null clears the override and returns the provider to the global policy.
-	BreakerThreshold  *int   `json:"breaker_threshold"`
-	BreakerCooldownMS *int64 `json:"breaker_cooldown_ms"`
+	Group             string   `json:"group"`
+	CatalogID         string   `json:"catalog_id"`
+	Kind              string   `json:"kind"`
+	BaseURL           string   `json:"base_url"`
+	APIKey            string   `json:"api_key"`
+	APIKeys           []string `json:"api_keys"`
+	APIKeyMethod      string   `json:"api_key_method"`
+	TimeoutMS         int64    `json:"timeout_ms"`
+	Enabled           bool     `json:"enabled"`
+	AliasPrefix       string   `json:"alias_prefix"`
+	UseProxyPool      bool     `json:"use_proxy_pool"`
+	BreakerThreshold  *int     `json:"breaker_threshold"`
+	BreakerCooldownMS *int64   `json:"breaker_cooldown_ms"`
 }
 
 func toProviderResponse(p storage.Provider, health router.ProviderHealth) providerResponse {
 	resp := providerResponse{
-		Name:         p.Name,
-		Group:        p.Group,
-		CatalogID:    p.CatalogID,
-		Kind:         p.Kind,
-		BaseURL:      p.BaseURL,
-		HasAPIKey:    p.APIKey != "",
-		TimeoutMS:    p.Timeout.Milliseconds(),
-		Enabled:      p.Enabled,
-		AliasPrefix:  p.AliasPrefix,
-		UseProxyPool: p.UseProxyPool,
-		Circuit:      string(router.CircuitClosed),
+		Name: p.Name, Group: p.Group, CatalogID: p.CatalogID, Kind: p.Kind,
+		BaseURL: p.BaseURL, HasAPIKey: p.APIKey != "" || len(p.APIKeys) > 0,
+		APIKeyCount: len(p.APIKeys), APIKeyMethod: p.APIKeyMethod,
+		TimeoutMS: p.Timeout.Milliseconds(), Enabled: p.Enabled,
+		AliasPrefix: p.AliasPrefix, UseProxyPool: p.UseProxyPool,
+		Circuit: string(router.CircuitClosed),
 	}
 	if health.State != "" {
 		resp.Circuit = string(health.State)
@@ -564,12 +556,27 @@ func (h *adminHandler) putProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.BreakerCooldownMS != nil {
 		if *req.BreakerCooldownMS < 0 {
-			writeError(w, http.StatusBadRequest, "invalid_request_error",
-				"Field 'breaker_cooldown_ms' must be zero or greater.")
+			writeError(w, http.StatusBadRequest, "invalid_request_error", "Field 'breaker_cooldown_ms' must be zero or greater.")
 			return
 		}
 		cooldown := time.Duration(*req.BreakerCooldownMS) * time.Millisecond
 		record.BreakerCooldown = &cooldown
+	}
+	keys := make([]string, 0, len(req.APIKeys)+1)
+	for _, key := range req.APIKeys {
+		if key = strings.TrimSpace(key); key != "" {
+			keys = append(keys, key)
+		}
+	}
+	if key := strings.TrimSpace(req.APIKey); key != "" {
+		keys = append(keys, key)
+	}
+	record.APIKeys = keys
+	if len(keys) > 0 {
+		record.APIKey = keys[0]
+	}
+	if strings.EqualFold(strings.TrimSpace(req.APIKeyMethod), "round_robin") {
+		record.APIKeyMethod = "round_robin"
 	}
 
 	// A catalogue entry supplies the endpoint and dialect, so a preset-backed
@@ -591,16 +598,16 @@ func (h *adminHandler) putProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	record.Kind = provider.NormalizeKind(record.Kind)
 
-	// An omitted api_key means "keep the current secret": the dashboard never
-	// receives it back, so it cannot echo it on update.
 	if record.APIKey == "" {
 		if existing, err := h.store.Providers().Get(ctx, name); err == nil {
-			record.APIKey = existing.APIKey
+			record.APIKey, record.APIKeys, record.APIKeyMethod = existing.APIKey, existing.APIKeys, existing.APIKeyMethod
 		}
 	}
-	if record.Group != string(provider.GroupCustom) && record.APIKey == "" {
-		writeError(w, http.StatusBadRequest, "invalid_request_error",
-			"Field 'api_key' is required for "+record.Group+" providers.")
+	if len(record.APIKeys) == 0 && record.APIKey != "" {
+		record.APIKeys = []string{record.APIKey}
+	}
+	if record.Group != string(provider.GroupCustom) && len(record.APIKeys) == 0 {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "Field 'api_key' or 'api_keys' is required for "+record.Group+" providers.")
 		return
 	}
 
@@ -731,11 +738,11 @@ func roundRate(rate float64) float64 {
 // --- upstream model catalogue ---
 
 type catalogModelResponse struct {
-	ID            string   `json:"id"`
-	OwnedBy       string   `json:"owned_by,omitempty"`
-	Imported      bool     `json:"imported"`
-	Alias         string   `json:"alias,omitempty"`
-	ContextWindow int      `json:"context_window"`
+	ID            string `json:"id"`
+	OwnedBy       string `json:"owned_by,omitempty"`
+	Imported      bool   `json:"imported"`
+	Alias         string `json:"alias,omitempty"`
+	ContextWindow int    `json:"context_window"`
 	// Capabilities previews what importing this model would tag it with, so
 	// the operator sees the guess before committing to it.
 	Capabilities []string `json:"capabilities"`
@@ -953,22 +960,24 @@ func (h *adminHandler) listCapabilities(w http.ResponseWriter, _ *http.Request) 
 // --- model aliases ---
 
 type modelResponse struct {
-	Alias    string   `json:"alias"`
-	Provider string   `json:"provider"`
-	Model    string   `json:"model"`
-	Fallback []string `json:"fallback"`
-	// Capabilities lists what the route serves, in canonical order.
-	Capabilities []string `json:"capabilities"`
+	Alias        string          `json:"alias"`
+	Provider     string          `json:"provider"`
+	Model        string          `json:"model"`
+	Fallback     []string        `json:"fallback"`
+	Capabilities []string        `json:"capabilities"`
+	MaxContext   int             `json:"max_context"`
+	QualityTier  int             `json:"quality_tier"`
+	Pricing      storage.Pricing `json:"pricing"`
 }
 
 type modelRequest struct {
-	Provider string   `json:"provider"`
-	Model    string   `json:"model"`
-	Fallback []string `json:"fallback"`
-	// Capabilities is optional: omitted, the set is inferred from the upstream
-	// model name. An explicit empty array clears it, so an operator can state
-	// "unknown" rather than accept the guess.
-	Capabilities *[]string `json:"capabilities"`
+	Provider     string           `json:"provider"`
+	Model        string           `json:"model"`
+	Fallback     []string         `json:"fallback"`
+	Capabilities *[]string        `json:"capabilities"`
+	MaxContext   *int             `json:"max_context"`
+	QualityTier  *int             `json:"quality_tier"`
+	Pricing      *storage.Pricing `json:"pricing"`
 }
 
 func (h *adminHandler) listAliases(w http.ResponseWriter, r *http.Request) {
@@ -991,33 +1000,43 @@ func (h *adminHandler) putAlias(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Provider == "" || req.Model == "" {
-		writeError(w, http.StatusBadRequest, "invalid_request_error",
-			"Fields 'provider' and 'model' are required.")
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "Fields 'provider' and 'model' are required.")
 		return
 	}
-
 	ctx := r.Context()
 	if _, err := h.store.Providers().Get(ctx, req.Provider); err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
-			writeError(w, http.StatusBadRequest, "invalid_request_error",
-				"Unknown provider '"+req.Provider+"'.")
+			writeError(w, http.StatusBadRequest, "invalid_request_error", "Unknown provider '"+req.Provider+"'.")
 			return
 		}
 		h.fail(w, err)
 		return
 	}
-
+	alias := urlParam(r, "alias")
+	existing, err := h.store.Models().Get(ctx, alias)
+	if err != nil && !errors.Is(err, storage.ErrNotFound) {
+		h.fail(w, err)
+		return
+	}
 	capabilities := provider.InferCapabilities(req.Model)
 	if req.Capabilities != nil {
 		capabilities = provider.NormalizeCapabilities(*req.Capabilities)
 	}
-
-	record := storage.ModelAlias{
-		Alias:        urlParam(r, "alias"),
-		Provider:     req.Provider,
-		Model:        req.Model,
-		Fallback:     req.Fallback,
-		Capabilities: capabilities,
+	record := existing
+	record.Alias, record.Provider, record.Model = alias, req.Provider, req.Model
+	record.Fallback, record.Capabilities = req.Fallback, capabilities
+	if req.MaxContext != nil {
+		if *req.MaxContext < 0 {
+			writeError(w, http.StatusBadRequest, "invalid_request_error", "Field 'max_context' must be nonnegative.")
+			return
+		}
+		record.MaxContext = *req.MaxContext
+	}
+	if req.QualityTier != nil {
+		record.QualityTier = *req.QualityTier
+	}
+	if req.Pricing != nil {
+		record.Pricing = *req.Pricing
 	}
 	if err := h.store.Models().Put(ctx, record); err != nil {
 		h.fail(w, err)
@@ -1127,11 +1146,8 @@ func toModelResponse(m storage.ModelAlias) modelResponse {
 		capabilities = []string{}
 	}
 	return modelResponse{
-		Alias:        m.Alias,
-		Provider:     m.Provider,
-		Model:        m.Model,
-		Fallback:     fallback,
-		Capabilities: capabilities,
+		Alias: m.Alias, Provider: m.Provider, Model: m.Model, Fallback: fallback,
+		Capabilities: capabilities, MaxContext: m.MaxContext, QualityTier: m.QualityTier, Pricing: m.Pricing,
 	}
 }
 
@@ -1150,6 +1166,61 @@ type comboRequest struct {
 	Members  []string `json:"members"`
 	Weights  []int    `json:"weights"`
 	Enabled  *bool    `json:"enabled"`
+}
+
+type comboRenameRequest struct {
+	Name string `json:"name"`
+}
+
+func (h *adminHandler) renameCombo(w http.ResponseWriter, r *http.Request) {
+	var req comboRenameRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	newName := strings.TrimSpace(req.Name)
+	if newName == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "Field 'name' must not be blank.")
+		return
+	}
+
+	ctx := r.Context()
+	oldName := urlParam(r, "name")
+	if newName != oldName {
+		if _, err := h.store.Models().Get(ctx, newName); err == nil {
+			writeError(w, http.StatusConflict, "invalid_request_error", "A model alias named '"+newName+"' already exists.")
+			return
+		} else if !errors.Is(err, storage.ErrNotFound) {
+			h.fail(w, err)
+			return
+		}
+		if _, err := h.store.Combos().Get(ctx, newName); err == nil {
+			writeError(w, http.StatusConflict, "invalid_request_error", "A combo named '"+newName+"' already exists.")
+			return
+		} else if !errors.Is(err, storage.ErrNotFound) {
+			h.fail(w, err)
+			return
+		}
+	}
+
+	combo, err := h.store.Combos().Get(ctx, oldName)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	if err := h.store.Combos().Rename(ctx, oldName, newName); err != nil {
+		if errors.Is(err, storage.ErrConflict) {
+			writeError(w, http.StatusConflict, "invalid_request_error", "A combo named '"+newName+"' already exists.")
+			return
+		}
+		h.fail(w, err)
+		return
+	}
+	if err := h.loader.Load(ctx); err != nil {
+		h.fail(w, err)
+		return
+	}
+	combo.Name = newName
+	writeJSON(w, http.StatusOK, toComboResponse(combo))
 }
 
 func (h *adminHandler) listCombos(w http.ResponseWriter, r *http.Request) {

@@ -46,34 +46,16 @@ import {
 import { useResource } from "@/lib/use-resource";
 
 type Draft = {
-  name: string;
-  group: ProviderGroup;
-  catalog_id: string;
-  kind: string;
-  base_url: string;
-  api_key: string;
-  timeout_ms: number;
-  enabled: boolean;
-  alias_prefix: string;
-  use_proxy_pool: boolean;
-  // Empty string means "inherit the global policy"; the API wants null.
-  breaker_threshold: string;
-  breaker_cooldown_ms: string;
+	name: string; group: ProviderGroup; catalog_id: string; kind: string; base_url: string;
+	api_key: string; api_keys: string; api_key_method: "off" | "round_robin";
+	timeout_ms: number; enabled: boolean; alias_prefix: string; use_proxy_pool: boolean;
+	breaker_threshold: string; breaker_cooldown_ms: string;
 };
 
 const blankDraft = (group: ProviderGroup): Draft => ({
-  name: "",
-  group,
-  catalog_id: "",
-  kind: group === "custom" ? "openai" : "anthropic",
-  base_url: "",
-  api_key: "",
-  timeout_ms: 60000,
-  enabled: true,
-  alias_prefix: "",
-  use_proxy_pool: false,
-  breaker_threshold: "",
-  breaker_cooldown_ms: "",
+	name: "", group, catalog_id: "", kind: group === "custom" ? "openai" : "anthropic",
+	base_url: "", api_key: "", api_keys: "", api_key_method: "off", timeout_ms: 60000,
+	enabled: true, alias_prefix: "", use_proxy_pool: false, breaker_threshold: "", breaker_cooldown_ms: "",
 });
 
 
@@ -135,7 +117,8 @@ export default function ProvidersPage() {
       group: groupOf(p),
       catalog_id: p.catalog_id ?? "",
       api_key: "",
-      // Null means inherited, which the form shows as an empty field.
+      api_keys: "",
+      api_key_method: p.api_key_method ?? "off",
       breaker_threshold: p.breaker_threshold?.toString() ?? "",
       breaker_cooldown_ms: p.breaker_cooldown_ms?.toString() ?? "",
     });
@@ -157,14 +140,7 @@ export default function ProvidersPage() {
   };
   const openCatalog = (entry: CatalogEntry) => {
     const base = blankDraft("api_key");
-    setDraft({
-      ...base,
-      catalog_id: entry.id,
-      kind: entry.kind,
-      base_url: entry.base_url,
-      name: entry.id,
-      alias_prefix: entry.alias_prefix,
-    });
+    setDraft({ ...base, catalog_id: entry.id, kind: entry.kind, base_url: entry.base_url, name: entry.id, alias_prefix: entry.alias_prefix });
     setEditing(false);
   };
 
@@ -173,31 +149,15 @@ export default function ProvidersPage() {
     setSaving(true);
     try {
       await api.put(`/providers/${encodeURIComponent(draft.name)}`, {
-        group: draft.group,
-        catalog_id: draft.catalog_id,
-        kind: draft.kind,
-        base_url: draft.base_url,
-        // An omitted api_key preserves the stored secret server-side.
+        group: draft.group, catalog_id: draft.catalog_id, kind: draft.kind, base_url: draft.base_url,
         ...(draft.api_key ? { api_key: draft.api_key } : {}),
-        timeout_ms: Number(draft.timeout_ms),
-        enabled: draft.enabled,
-        alias_prefix: draft.alias_prefix.trim(),
+        ...(draft.api_keys.trim() ? { api_keys: draft.api_keys.split(/\r?\n|,/).map((v) => v.trim()).filter(Boolean) } : {}),
+        api_key_method: draft.api_key_method,
+        timeout_ms: Number(draft.timeout_ms), enabled: draft.enabled, alias_prefix: draft.alias_prefix.trim(),
         use_proxy_pool: draft.use_proxy_pool,
-        // A blank field clears the override; null reads as "inherit".
-        breaker_threshold:
-          draft.breaker_threshold.trim() === ""
-            ? null
-            : Number(draft.breaker_threshold),
-        breaker_cooldown_ms:
-          draft.breaker_cooldown_ms.trim() === ""
-            ? null
-            : Number(draft.breaker_cooldown_ms),
+        breaker_threshold: draft.breaker_threshold.trim() === "" ? null : Number(draft.breaker_threshold),
+        breaker_cooldown_ms: draft.breaker_cooldown_ms.trim() === "" ? null : Number(draft.breaker_cooldown_ms),
       });
-      toast.success(`Saved provider '${draft.name}'.`);
-      setDraft(undefined);
-      await reload();
-    } catch (err) {
-      toast.error(err instanceof ApiError ? err.message : String(err));
     } finally {
       setSaving(false);
     }
@@ -587,6 +547,15 @@ export default function ProvidersPage() {
                   onCheckedChange={(enabled) => setDraft({ ...draft, enabled })}
                 />
                 <Label htmlFor="enabled">Enabled</Label>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="api_keys">Additional API keys</Label>
+                <textarea id="api_keys" className="border-input bg-background min-h-20 w-full rounded-md border px-3 py-2 text-sm" value={draft.api_keys} placeholder="one key per line" onChange={(e) => setDraft({ ...draft, api_keys: e.target.value })} />
+                <p className="text-muted-foreground text-xs">Optional. Comma or newline separated; secrets are never returned by the API.</p>
+              </div>
+              <div className="flex items-center gap-3">
+                <Switch id="api_key_method" checked={draft.api_key_method === "round_robin"} onCheckedChange={(enabled) => setDraft({ ...draft, api_key_method: enabled ? "round_robin" : "off" })} />
+                <Label htmlFor="api_key_method">Round-robin API keys</Label>
               </div>
               <div className="space-y-2 border-t pt-4">
                 <Label className="text-muted-foreground text-xs font-normal">

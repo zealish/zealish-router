@@ -123,6 +123,75 @@ func TestSQLiteComboStore(t *testing.T) { runComboSuite(t, newTestStore(t)) }
 
 func TestMemoryComboStore(t *testing.T) { runComboSuite(t, NewMemory()) }
 
+func TestComboRename(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		store func(*testing.T) Store
+	}{
+		{name: "memory", store: func(*testing.T) Store { return NewMemory() }},
+		{name: "sqlite", store: func(t *testing.T) Store { return newTestStore(t) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := tc.store(t)
+			ctx := context.Background()
+			combo := Combo{
+				Name: "before", Strategy: ComboWeighted,
+				Members: []string{"a", "b"}, Weights: []int{3, 7}, Enabled: true,
+			}
+			if err := store.Combos().Put(ctx, combo); err != nil {
+				t.Fatalf("put combo: %v", err)
+			}
+			if err := store.Combos().Put(ctx, Combo{Name: "occupied", Members: []string{"a"}}); err != nil {
+				t.Fatalf("put destination combo: %v", err)
+			}
+			if err := store.Combos().Rename(ctx, "before", "after"); err != nil {
+				t.Fatalf("rename combo: %v", err)
+			}
+			got, err := store.Combos().Get(ctx, "after")
+			if err != nil {
+				t.Fatalf("get renamed combo: %v", err)
+			}
+			if got.Name != "after" || got.Strategy != combo.Strategy || got.Enabled != combo.Enabled ||
+				!equalStrings(got.Members, combo.Members) || !equalInts(got.Weights, combo.Weights) {
+				t.Fatalf("renamed combo = %+v, want fields preserved with new name", got)
+			}
+			if _, err := store.Combos().Get(ctx, "before"); !errors.Is(err, ErrNotFound) {
+				t.Fatalf("old combo lookup err = %v, want ErrNotFound", err)
+			}
+			if err := store.Combos().Rename(ctx, "after", "occupied"); !errors.Is(err, ErrConflict) {
+				t.Fatalf("destination collision err = %v, want ErrConflict", err)
+			}
+			if err := store.Combos().Rename(ctx, "missing", "new"); !errors.Is(err, ErrNotFound) {
+				t.Fatalf("missing source err = %v, want ErrNotFound", err)
+			}
+		})
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func equalInts(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestSQLiteCombosSurviveReopen(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()

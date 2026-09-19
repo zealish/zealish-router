@@ -14,6 +14,9 @@ import (
 // ErrNotFound is returned when a record does not exist.
 var ErrNotFound = errors.New("storage: not found")
 
+// ErrConflict is returned when an operation would overwrite an existing record.
+var ErrConflict = errors.New("storage: conflict")
+
 // APIKey is a hashed credential record.
 type APIKey struct {
 	ID         string
@@ -39,9 +42,15 @@ type Provider struct {
 	Name    string
 	Kind    string
 	BaseURL string
+	// APIKey is the legacy primary credential. APIKeys is authoritative when
+	// non-empty, while APIKey remains populated for compatibility and redaction.
 	APIKey  string
-	Timeout time.Duration
-	Enabled bool
+	APIKeys []string
+	// APIKeyMethod controls credential selection. Empty and "off" use APIKey;
+	// "round_robin" rotates APIKeys atomically per request.
+	APIKeyMethod string
+	Timeout      time.Duration
+	Enabled      bool
 	// Group classifies the provider as custom, oauth or api_key. It decides how
 	// the credential is obtained, not how the upstream is spoken to.
 	Group string
@@ -159,6 +168,7 @@ type ComboStore interface {
 	List(ctx context.Context) ([]Combo, error)
 	Get(ctx context.Context, name string) (Combo, error)
 	Put(ctx context.Context, c Combo) error
+	Rename(ctx context.Context, oldName, newName string) error
 	Delete(ctx context.Context, name string) error
 }
 
@@ -672,6 +682,26 @@ func (s *memoryCombos) Put(_ context.Context, c Combo) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.items[c.Name] = c
+	return nil
+}
+
+func (s *memoryCombos) Rename(_ context.Context, oldName, newName string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	c, ok := s.items[oldName]
+	if !ok {
+		return ErrNotFound
+	}
+	if oldName == newName {
+		return nil
+	}
+	if _, exists := s.items[newName]; exists {
+		return ErrConflict
+	}
+	delete(s.items, oldName)
+	c.Name = newName
+	s.items[newName] = c
 	return nil
 }
 

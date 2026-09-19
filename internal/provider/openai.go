@@ -4,10 +4,13 @@ import "net/http"
 
 // Options configures an HTTP-backed provider implementation.
 type Options struct {
-	Name       string
-	BaseURL    string
-	APIKey     string
-	HTTPClient *http.Client
+	Name    string
+	BaseURL string
+	APIKey  string
+	// APIKeys enables credential selection when APIKeyMethod is round_robin.
+	APIKeys      []string
+	APIKeyMethod string
+	HTTPClient   *http.Client
 	// AuthHeader overrides the default "Authorization: Bearer <key>" credential
 	// header. Anthropic-compatible upstreams use "x-api-key" for API keys and
 	// keep the bearer form for OAuth tokens.

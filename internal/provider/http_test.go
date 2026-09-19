@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -68,6 +69,25 @@ func TestChatCompletionHappyPath(t *testing.T) {
 	}
 	if auth := gotHeaders.Get("Authorization"); auth != "Bearer sk-test" {
 		t.Errorf("Authorization = %q", auth)
+	}
+}
+
+func TestAPIKeyRoundRobin(t *testing.T) {
+	var got []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.Header.Get("Authorization"))
+		writeJSON(t, w, openai.ChatCompletionResponse{ID: "ok", Choices: []openai.Choice{{Index: 0, Message: &openai.Message{Role: "assistant", Content: json.RawMessage(`"ok"`)}}}})
+	}))
+	t.Cleanup(srv.Close)
+	p := NewOpenAI(Options{Name: "openai", BaseURL: srv.URL, APIKeys: []string{"key-a", "key-b"}, APIKeyMethod: "round_robin", HTTPClient: srv.Client()})
+	for i := 0; i < 4; i++ {
+		if _, err := p.ChatCompletion(context.Background(), testRequest()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := []string{"Bearer key-a", "Bearer key-b", "Bearer key-a", "Bearer key-b"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("authorization = %v, want %v", got, want)
 	}
 }
 func TestCommandCodeAPIKeyConnection(t *testing.T) {

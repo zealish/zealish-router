@@ -23,8 +23,9 @@ func sampleProvider(name string) Provider {
 func TestProviderRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	providers := newTestStore(t).Providers()
-
 	want := sampleProvider("openai")
+	want.APIKeys = []string{want.APIKey}
+	want.APIKeyMethod = "off"
 	if err := providers.Put(ctx, want); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
@@ -33,7 +34,7 @@ func TestProviderRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if got != want {
+	if got.ID != want.ID || got.Name != want.Name || got.Kind != want.Kind || got.BaseURL != want.BaseURL || got.APIKey != want.APIKey || !slices.Equal(got.APIKeys, want.APIKeys) || got.APIKeyMethod != want.APIKeyMethod || got.Timeout != want.Timeout || got.Enabled != want.Enabled {
 		t.Errorf("provider = %+v, want %+v", got, want)
 	}
 }

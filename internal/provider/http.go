@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 
 	"github.com/zealish/zealish-router/pkg/openai"
 )
@@ -25,15 +26,36 @@ const maxErrorBody = 8 << 10
 // httpProvider is the shared implementation behind every OpenAI-compatible
 // upstream. Concrete providers embed it and supply their own headers.
 type httpProvider struct {
-	opts    Options
-	headers map[string]string
+	opts     Options
+	headers  map[string]string
+	keyIndex atomic.Uint64
 }
 
 func newHTTPProvider(opts Options, headers map[string]string) httpProvider {
 	if opts.HTTPClient == nil {
 		opts.HTTPClient = http.DefaultClient
 	}
+	if len(opts.APIKeys) == 0 && opts.APIKey != "" {
+		opts.APIKeys = []string{opts.APIKey}
+	}
 	return httpProvider{opts: opts, headers: headers}
+}
+
+// credential selects the key for one upstream request. Rotation is disabled
+// unless explicitly configured as round_robin.
+func (p *httpProvider) credential() string {
+	if p.opts.APIKeyMethod != "round_robin" || len(p.opts.APIKeys) == 0 {
+		return p.opts.APIKey
+	}
+	i := p.keyIndex.Add(1) - 1
+	return p.opts.APIKeys[i%uint64(len(p.opts.APIKeys))]
+}
+
+func (p *httpProvider) redactCredential(msg string) string {
+	for _, key := range p.opts.APIKeys {
+		msg = redact(key, msg)
+	}
+	return redact(p.opts.APIKey, msg)
 }
 
 // Name implements Provider.
@@ -222,11 +244,12 @@ func (p *httpProvider) do(ctx context.Context, path string, payload []byte, stre
 // style differs per dialect: OpenAI-compatible upstreams take a bearer token,
 // Anthropic takes the key in x-api-key unless it is an OAuth token.
 func (p *httpProvider) applyHeaders(req *http.Request) {
-	if p.opts.APIKey != "" {
+	key := p.credential()
+	if key != "" {
 		if p.opts.AuthHeader != "" {
-			req.Header.Set(p.opts.AuthHeader, p.opts.APIKey)
+			req.Header.Set(p.opts.AuthHeader, key)
 		} else {
-			req.Header.Set("Authorization", "Bearer "+p.opts.APIKey)
+			req.Header.Set("Authorization", "Bearer "+key)
 		}
 	}
 	for k, v := range p.headers {
@@ -234,14 +257,13 @@ func (p *httpProvider) applyHeaders(req *http.Request) {
 	}
 }
 
-// transportError classifies a failure that occurred before a response arrived.
 func (p *httpProvider) transportError(_ context.Context, err error) error {
 	kind := ErrConnection
 	var netErr net.Error
 	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
 		kind = ErrTimeout
 	}
-	return &Error{Provider: p.opts.Name, Kind: kind, Message: redact(p.opts.APIKey, err.Error())}
+	return &Error{Provider: p.opts.Name, Kind: kind, Message: p.redactCredential(err.Error())}
 }
 
 // statusError maps a non-2xx upstream response onto a classified error.
@@ -258,7 +280,7 @@ func (p *httpProvider) statusError(resp *http.Response) error {
 	e := &Error{
 		Provider: p.opts.Name,
 		Status:   resp.StatusCode,
-		Message:  redact(p.opts.APIKey, message),
+		Message:  p.redactCredential(message),
 		Code:     code,
 	}
 	switch {

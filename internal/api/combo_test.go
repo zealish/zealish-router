@@ -54,6 +54,49 @@ func TestAdminComboCRUDRepublishesRoutes(t *testing.T) {
 	}
 }
 
+func TestAdminComboRenameRepublishesRoutes(t *testing.T) {
+	h, _, engine := newAdminServer(t)
+	seedCombo(t, h)
+	if rec := adminRequest(t, h, http.MethodPut, "/api/v1/combos/old-name", `{"strategy":"round_robin","members":["gpt-5","fast"],"enabled":true}`); rec.Code != http.StatusOK {
+		t.Fatalf("put combo status = %d (body=%q)", rec.Code, rec.Body.String())
+	}
+
+	rec := adminRequest(t, h, http.MethodPost, "/api/v1/combos/old-name/rename", `{"name":"new-name"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("rename status = %d (body=%q)", rec.Code, rec.Body.String())
+	}
+	response := decodeJSON[map[string]any](t, rec)
+	if response["name"] != "new-name" || response["strategy"] != "round_robin" {
+		t.Fatalf("rename response = %v", response)
+	}
+	if _, err := engine.Resolve("old-name"); err == nil {
+		t.Error("old combo name still resolves after rename")
+	}
+	if _, err := engine.Resolve("new-name"); err != nil {
+		t.Fatalf("new combo name does not resolve: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		body string
+		want int
+	}{
+		{"blank", `{"name":"   "}`, http.StatusBadRequest},
+		{"alias collision", `{"name":"gpt-5"}`, http.StatusConflict},
+		{"combo collision", `{"name":"other"}`, http.StatusConflict},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.name == "combo collision" {
+				adminRequest(t, h, http.MethodPut, "/api/v1/combos/other", `{"members":["gpt-5"]}`)
+			}
+			rec := adminRequest(t, h, http.MethodPost, "/api/v1/combos/new-name/rename", tc.body)
+			if rec.Code != tc.want {
+				t.Errorf("status = %d, want %d (body=%q)", rec.Code, tc.want, rec.Body.String())
+			}
+		})
+	}
+}
+
 func TestAdminComboValidation(t *testing.T) {
 	h, _, _ := newAdminServer(t)
 	seedCombo(t, h)

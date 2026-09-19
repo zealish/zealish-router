@@ -304,36 +304,38 @@ export type ProviderGroup = "custom" | "oauth" | "api_key";
 export type CircuitState = "closed" | "open" | "half_open";
 
 export type Provider = {
-  name: string;
-  group: ProviderGroup;
-  catalog_id?: string;
-  kind: string;
-  base_url: string;
-  has_api_key: boolean;
-  timeout_ms: number;
-  enabled: boolean;
-  alias_prefix: string;
-  use_proxy_pool: boolean;
-  circuit?: CircuitState;
-  circuit_retry_at?: string;
-  /** Null means the provider inherits the policy from config.yaml. */
-  breaker_threshold?: number | null;
-  breaker_cooldown_ms?: number | null;
+	name: string;
+	group: ProviderGroup;
+	catalog_id?: string;
+	kind: string;
+	base_url: string;
+	has_api_key: boolean;
+	api_key_count: number;
+	api_key_method: "off" | "round_robin";
+	timeout_ms: number;
+	enabled: boolean;
+	alias_prefix: string;
+	use_proxy_pool: boolean;
+	circuit?: CircuitState;
+	circuit_retry_at?: string;
+	breaker_threshold?: number | null;
+	breaker_cooldown_ms?: number | null;
 };
 
 export type ProviderInput = {
-  group: ProviderGroup;
-  catalog_id?: string;
-  kind: string;
-  base_url: string;
-  api_key?: string;
-  timeout_ms: number;
-  enabled: boolean;
-  alias_prefix: string;
-  use_proxy_pool?: boolean;
-  /** Null clears the override, returning the provider to the global policy. */
-  breaker_threshold?: number | null;
-  breaker_cooldown_ms?: number | null;
+	group: ProviderGroup;
+	catalog_id?: string;
+	kind: string;
+	base_url: string;
+	api_key?: string;
+	api_keys?: string[];
+	api_key_method?: "off" | "round_robin";
+	timeout_ms: number;
+	enabled: boolean;
+	alias_prefix: string;
+	use_proxy_pool?: boolean;
+	breaker_threshold?: number | null;
+	breaker_cooldown_ms?: number | null;
 };
 
 export type Proxy = {

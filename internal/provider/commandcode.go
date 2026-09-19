@@ -18,7 +18,7 @@ import (
 const commandCodeDefaultMaxTokens = 64000
 const commandCodeErrorKey = "commandcode_error"
 
-type CommandCode struct{ opts Options }
+type CommandCode struct{ httpProvider }
 
 func NewCommandCode(opts Options) *CommandCode {
 	if opts.Name == "" {
@@ -27,10 +27,7 @@ func NewCommandCode(opts Options) *CommandCode {
 	if opts.BaseURL == "" {
 		opts.BaseURL = "https://api.commandcode.ai"
 	}
-	if opts.HTTPClient == nil {
-		opts.HTTPClient = http.DefaultClient
-	}
-	return &CommandCode{opts: opts}
+	return &CommandCode{httpProvider: newHTTPProvider(opts, nil)}
 }
 func (p *CommandCode) Name() string         { return p.opts.Name }
 func (p *CommandCode) Client() *http.Client { return p.opts.HTTPClient }
@@ -92,9 +89,9 @@ func (p *CommandCode) ChatCompletionStream(ctx context.Context, req *openai.Chat
 	h.Header.Set("Accept", "application/x-ndjson")
 	h.Header.Set("x-command-code-version", "0.25.7")
 	h.Header.Set("x-cli-environment", "cli")
-	h.Header.Set("x-session-id", uuid.NewString())
-	if p.opts.APIKey != "" {
-		h.Header.Set("Authorization", "Bearer "+p.opts.APIKey)
+	key := p.credential()
+	if key != "" {
+		h.Header.Set("Authorization", "Bearer "+key)
 	}
 	resp, err := p.opts.HTTPClient.Do(h)
 	if err != nil {

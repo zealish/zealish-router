@@ -312,7 +312,7 @@ type sqliteProviders struct {
 	db *sql.DB
 }
 
-const providerColumns = `id, name, kind, base_url, api_key, timeout_ms, enabled, alias_prefix, provider_group, catalog_id, use_proxy_pool, breaker_threshold, breaker_cooldown_ms`
+const providerColumns = `id, name, kind, base_url, api_key, api_keys, api_key_method, timeout_ms, enabled, alias_prefix, provider_group, catalog_id, use_proxy_pool, breaker_threshold, breaker_cooldown_ms`
 
 func (s *sqliteProviders) List(ctx context.Context) ([]Provider, error) {
 	rows, err := s.db.QueryContext(ctx,
@@ -362,11 +362,13 @@ func (s *sqliteProviders) Put(ctx context.Context, p Provider) error {
 
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO providers (`+providerColumns+`)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(name) DO UPDATE SET
 		   kind = excluded.kind,
 		   base_url = excluded.base_url,
 		   api_key = excluded.api_key,
+		   api_keys = excluded.api_keys,
+		   api_key_method = excluded.api_key_method,
 		   timeout_ms = excluded.timeout_ms,
 		   enabled = excluded.enabled,
 		   alias_prefix = excluded.alias_prefix,
@@ -375,7 +377,7 @@ func (s *sqliteProviders) Put(ctx context.Context, p Provider) error {
 		   use_proxy_pool = excluded.use_proxy_pool,
 		   breaker_threshold = excluded.breaker_threshold,
 		   breaker_cooldown_ms = excluded.breaker_cooldown_ms`,
-		p.ID, p.Name, p.Kind, p.BaseURL, p.APIKey, p.Timeout.Milliseconds(), p.Enabled, p.AliasPrefix,
+		p.ID, p.Name, p.Kind, p.BaseURL, p.APIKey, encodeAPIKeys(p.APIKeys), normalizeAPIKeyMethod(p.APIKeyMethod), p.Timeout.Milliseconds(), p.Enabled, p.AliasPrefix,
 		p.Group, p.CatalogID, p.UseProxyPool, threshold, cooldownMS)
 	if err != nil {
 		return fmt.Errorf("storage: put provider: %w", err)
@@ -497,17 +499,20 @@ func pruneFallbacks(ctx context.Context, tx *sql.Tx, dropped map[string]bool) er
 func scanProvider(src scanner) (Provider, error) {
 	var (
 		p          Provider
+		apiKeysRaw string
 		timeoutMS  int64
 		threshold  sql.NullInt64
 		cooldownMS sql.NullInt64
 	)
-	if err := src.Scan(&p.ID, &p.Name, &p.Kind, &p.BaseURL, &p.APIKey, &timeoutMS, &p.Enabled,
+	if err := src.Scan(&p.ID, &p.Name, &p.Kind, &p.BaseURL, &p.APIKey, &apiKeysRaw, &p.APIKeyMethod, &timeoutMS, &p.Enabled,
 		&p.AliasPrefix, &p.Group, &p.CatalogID, &p.UseProxyPool, &threshold, &cooldownMS); err != nil {
 		return Provider{}, err
 	}
+	p.APIKeys = decodeAPIKeys(apiKeysRaw)
+	if len(p.APIKeys) == 0 && p.APIKey != "" {
+		p.APIKeys = []string{p.APIKey}
+	}
 	p.Timeout = time.Duration(timeoutMS) * time.Millisecond
-	// NULL means "inherit the global policy", so the pointers stay nil rather
-	// than collapsing to a zero that would read as "breaker disabled".
 	if threshold.Valid {
 		v := int(threshold.Int64)
 		p.BreakerThreshold = &v
@@ -672,6 +677,52 @@ func (s *sqliteCombos) Put(ctx context.Context, c Combo) error {
 	return nil
 }
 
+func (s *sqliteCombos) Rename(ctx context.Context, oldName, newName string) error {
+	if oldName == newName {
+		var exists int
+		err := s.db.QueryRowContext(ctx, `SELECT 1 FROM combos WHERE name = ?`, oldName).Scan(&exists)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("storage: check combo: %w", err)
+		}
+		return nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("storage: rename combo: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx,
+		`UPDATE combos SET name = ?
+		 WHERE name = ? AND NOT EXISTS (SELECT 1 FROM combos WHERE name = ?)`,
+		newName, oldName, newName)
+	if err != nil {
+		return fmt.Errorf("storage: rename combo: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("storage: rename combo: %w", err)
+	}
+	if n == 0 {
+		var exists int
+		err := tx.QueryRowContext(ctx, `SELECT 1 FROM combos WHERE name = ?`, oldName).Scan(&exists)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("storage: check combo: %w", err)
+		}
+		return ErrConflict
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("storage: rename combo: %w", err)
+	}
+	return nil
+}
 func (s *sqliteCombos) Delete(ctx context.Context, name string) error {
 	res, err := s.db.ExecContext(ctx, `DELETE FROM combos WHERE name = ?`, name)
 	if err != nil {

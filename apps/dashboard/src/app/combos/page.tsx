@@ -63,7 +63,7 @@ import {
 } from "@/lib/api";
 import { useResource } from "@/lib/use-resource";
 
-type Draft = Combo & { editing: boolean };
+type Draft = Combo & { editing: boolean; originalName?: string };
 
 const blankDraft = (): Draft => ({
   name: "",
@@ -88,13 +88,25 @@ export default function CombosPage() {
 
   const save = async () => {
     if (!draft) return;
+    const name = draft.name.trim();
+    if (!name) {
+      toast.error("Enter a combo name.");
+      return;
+    }
     if (draft.members.length === 0) {
       toast.error("Add at least one model to the pool.");
       return;
     }
     setSaving(true);
     try {
-      await api.put(`/combos/${encodeURIComponent(draft.name.trim())}`, {
+      const oldName = draft.originalName?.trim();
+      if (draft.editing && oldName && oldName !== name) {
+        await api.post(`/combos/${encodeURIComponent(oldName)}/rename`, {
+          name,
+        });
+        setDraft({ ...draft, name, originalName: name });
+      }
+      await api.put(`/combos/${encodeURIComponent(name)}`, {
         strategy: draft.strategy,
         members: draft.members,
         weights:
@@ -103,7 +115,11 @@ export default function CombosPage() {
             : [],
         enabled: draft.enabled,
       });
-      toast.success(`Saved combo '${draft.name}'.`);
+      toast.success(
+        draft.editing && oldName && oldName !== name
+          ? `Renamed and saved combo '${name}'.`
+          : `Saved combo '${name}'.`,
+      );
       setDraft(undefined);
       await reload();
     } catch (err) {
@@ -218,7 +234,9 @@ export default function CombosPage() {
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={() => setDraft({ ...c, editing: true })}
+                    onClick={() =>
+                      setDraft({ ...c, editing: true, originalName: c.name })
+                    }
                   >
                     <Pencil />
                     Edit
@@ -302,7 +320,6 @@ export default function CombosPage() {
                 <Input
                   id="name"
                   required
-                  readOnly={draft.editing}
                   value={draft.name}
                   placeholder="code-agent"
                   onChange={(e) => setDraft({ ...draft, name: e.target.value })}

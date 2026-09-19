@@ -37,15 +37,15 @@ func newAdminServer(t *testing.T) (http.Handler, storage.Store, *router.Engine) 
 	loader := router.NewLoader(store.Providers(), store.Models(), store.Combos(), store.Proxies(), engine)
 
 	deps := Dependencies{
-		Config:     cfg,
-		Engine:     engine,
-		Loader:     loader,
-		Store:      store,
-		Auth:       auth.NewService(false, nil, nil, logger),
-		AdminAuth:  auth.NewAdminService(true, adminToken),
-		Quota:      auth.NewQuota(store.Usage()),
-		Metrics:    collector,
-		Logger:     logger,
+		Config:    cfg,
+		Engine:    engine,
+		Loader:    loader,
+		Store:     store,
+		Auth:      auth.NewService(false, nil, nil, logger),
+		AdminAuth: auth.NewAdminService(true, adminToken),
+		Quota:     auth.NewQuota(store.Usage()),
+		Metrics:   collector,
+		Logger:    logger,
 	}
 	return newRoutes(deps, newHandler(deps)), store, engine
 }
@@ -617,6 +617,27 @@ func TestAdminImportCatalogFailureDoesNotWriteAliases(t *testing.T) {
 	}
 }
 
+func TestAdminAliasMetadataRoundTrip(t *testing.T) {
+	h, store, _ := newAdminServer(t)
+	if rec := adminRequest(t, h, http.MethodPut, "/api/v1/providers/acme", `{"kind":"openai","base_url":"https://api.example.com/v1","enabled":true}`); rec.Code != http.StatusOK {
+		t.Fatalf("put provider: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := adminRequest(t, h, http.MethodPut, "/api/v1/models/acme-model", `{"provider":"acme","model":"model","max_context":32768,"quality_tier":80,"pricing":{"Input":1.2,"Output":2.4}}`); rec.Code != http.StatusOK {
+		t.Fatalf("put model: %d %s", rec.Code, rec.Body.String())
+	}
+	model, err := store.Models().Get(context.Background(), "acme-model")
+	if err != nil || model.MaxContext != 32768 || model.QualityTier != 80 || model.Pricing.Input != 1.2 {
+		t.Fatalf("metadata = %+v, err=%v", model, err)
+	}
+	if rec := adminRequest(t, h, http.MethodPut, "/api/v1/models/acme-model", `{"provider":"acme","model":"model-v2","capabilities":["chat"]}`); rec.Code != http.StatusOK {
+		t.Fatalf("edit model: %d %s", rec.Code, rec.Body.String())
+	}
+	model, _ = store.Models().Get(context.Background(), "acme-model")
+	if model.MaxContext != 32768 || model.QualityTier != 80 {
+		t.Fatalf("metadata lost on edit: %+v", model)
+	}
+}
+
 // Two providers advertising the same upstream model must not collide: each
 // provider's configured alias prefix namespaces its imports.
 func TestAdminImportUsesProviderAliasPrefix(t *testing.T) {
@@ -995,4 +1016,3 @@ func TestAdminKeyAllowlistUnknownKeyReturns404(t *testing.T) {
 		t.Errorf("status = %d, want 404", got)
 	}
 }
-
