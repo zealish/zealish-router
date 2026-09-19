@@ -7,8 +7,10 @@ import {
   Activity,
   ArrowLeft,
   Download,
+  KeyRound,
   Loader2,
   Pencil,
+  Plus,
   Trash2,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -42,6 +44,7 @@ import {
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Switch } from "@/components/ui/switch";
 import {
   api,
   ApiError,
@@ -53,9 +56,12 @@ import {
   PROVIDER_GROUPS,
   type ModelTestResult,
   type Provider,
+  type ProviderAPIKey,
+  type ProviderKeySettings,
   type ProviderMetrics,
 } from "@/lib/api";
 import { useResource } from "@/lib/use-resource";
+
 
 /** Health metrics refresh on their own, so the page reflects live traffic. */
 const METRICS_POLL_MS = 10_000;
@@ -141,6 +147,67 @@ export default function ProviderDetailPage() {
   // so only the in-flight alias needs local state.
   const [testing, setTesting] = useState<string>();
   const [testingAll, setTestingAll] = useState(false);
+  const providerKeys = useResource<ProviderAPIKey[]>(
+    `/providers/${encodeURIComponent(name)}/keys`,
+  );
+  const [keyDraft, setKeyDraft] = useState<string>();
+  const [editingKey, setEditingKey] = useState<ProviderAPIKey>();
+  const [keySaving, setKeySaving] = useState(false);
+  const keySettings = useResource<ProviderKeySettings>(
+    `/providers/${encodeURIComponent(name)}/keys/settings`,
+  );
+  const [keyRotationSaving, setKeyRotationSaving] = useState(false);
+
+  const setRoundRobin = async (enabled: boolean) => {
+    setKeyRotationSaving(true);
+    try {
+      await api.put(`/providers/${encodeURIComponent(name)}/keys/settings`, {
+        enabled,
+      });
+      toast.success(enabled ? "Round-robin enabled." : "Round-robin disabled.");
+      await Promise.all([keySettings.reload(), providers.reload()]);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : String(err));
+    } finally {
+      setKeyRotationSaving(false);
+    }
+  };
+
+  const saveProviderKey = async () => {
+    const key = keyDraft?.trim();
+    if (!key) return;
+    setKeySaving(true);
+    try {
+      const base = `/providers/${encodeURIComponent(name)}/keys`;
+      if (editingKey) {
+        await api.put(`${base}/${encodeURIComponent(editingKey.id)}`, { key });
+        toast.success("Provider API key updated.");
+      } else {
+        await api.post(base, { key });
+        toast.success("Provider API key added.");
+      }
+      setKeyDraft(undefined);
+      setEditingKey(undefined);
+      await Promise.all([providerKeys.reload(), providers.reload()]);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : String(err));
+    } finally {
+      setKeySaving(false);
+    }
+  };
+
+  const removeProviderKey = async (key: ProviderAPIKey) => {
+    if (!confirm(`Delete provider API key '${key.masked}'?`)) return;
+    try {
+      await api.del(
+        `/providers/${encodeURIComponent(name)}/keys/${encodeURIComponent(key.id)}`,
+      );
+      toast.success("Provider API key deleted.");
+      await Promise.all([providerKeys.reload(), providers.reload()]);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : String(err));
+    }
+  };
 
   const provider = providers.data?.find((p) => p.name === name);
   const models = (data ?? []).filter((m) => m.provider === name);
@@ -556,6 +623,79 @@ export default function ProviderDetailPage() {
         </CardContent>
       </Card>
 
+      <Card className="mb-6">
+        <CardHeader className="flex flex-row items-center justify-between gap-4">
+          <div>
+            <CardTitle className="text-base">API Keys</CardTitle>
+            <p className="text-muted-foreground mt-1 text-sm">
+              Credentials are masked and never returned in full.
+            </p>
+          </div>
+          <Button
+            size="sm"
+            onClick={() => {
+              setEditingKey(undefined);
+              setKeyDraft("");
+            }}
+          >
+            <Plus />
+            Add key
+          </Button>
+        </CardHeader>
+          <div className="flex items-center gap-3 px-6 pb-4">
+            <Switch
+              id="provider-round-robin"
+              checked={keySettings.data?.method === "round_robin"}
+              disabled={keyRotationSaving || keySettings.loading || !keySettings.data || (keySettings.data.method !== "round_robin" && (providerKeys.data?.length ?? 0) < 2)}
+              onCheckedChange={(enabled) => void setRoundRobin(enabled)}
+            />
+            <div>
+              <Label htmlFor="provider-round-robin">Round-robin keys</Label>
+              <p className="text-muted-foreground text-xs">
+                Rotate credentials per request. Requires at least two keys.
+              </p>
+            </div>
+          </div>
+        <CardContent>
+          {providerKeys.error ? (
+            <p className="text-destructive text-sm">{providerKeys.error}</p>
+          ) : providerKeys.loading ? (
+            <Skeleton className="h-10 w-full" />
+          ) : providerKeys.data?.length ? (
+            <div className="divide-y rounded-md border">
+              {providerKeys.data.map((key) => (
+                <div key={key.id} className="flex items-center justify-between gap-3 px-3 py-2.5">
+                  <span className="font-mono text-sm">{key.masked}</span>
+                  <div className="flex gap-1">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      title="Replace key"
+                      onClick={() => {
+                        setEditingKey(key);
+                        setKeyDraft("");
+                      }}
+                    >
+                      <Pencil />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      title="Delete key"
+                      onClick={() => void removeProviderKey(key)}
+                    >
+                      <Trash2 />
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-muted-foreground text-sm">No API keys configured.</p>
+          )}
+        </CardContent>
+      </Card>
+
       <div className="mb-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <Kpi
           label="TTFB"
@@ -762,6 +902,60 @@ export default function ProviderDetailPage() {
             </Button>
             <Button type="submit" form="model-form" disabled={saving}>
               Save
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={keyDraft !== undefined}
+        onOpenChange={(open) => {
+          if (!open) {
+            setKeyDraft(undefined);
+            setEditingKey(undefined);
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{editingKey ? "Replace API key" : "Add API key"}</DialogTitle>
+            <DialogDescription>
+              The full credential is stored securely and never returned by the API.
+            </DialogDescription>
+          </DialogHeader>
+          <form
+            id="provider-key-form"
+            className="space-y-4"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void saveProviderKey();
+            }}
+          >
+            <div className="space-y-2">
+              <Label htmlFor="provider-key">API key</Label>
+              <Input
+                id="provider-key"
+                type="password"
+                autoComplete="off"
+                autoFocus
+                required
+                value={keyDraft ?? ""}
+                onChange={(e) => setKeyDraft(e.target.value)}
+                placeholder="Paste provider API key"
+              />
+            </div>
+          </form>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              type="button"
+              onClick={() => setKeyDraft(undefined)}
+            >
+              Cancel
+            </Button>
+            <Button type="submit" form="provider-key-form" disabled={keySaving}>
+              {keySaving ? <Loader2 className="animate-spin" /> : <KeyRound />}
+              Save key
             </Button>
           </DialogFooter>
         </DialogContent>

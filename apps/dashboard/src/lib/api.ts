@@ -322,6 +322,15 @@ export type Provider = {
 	breaker_cooldown_ms?: number | null;
 };
 
+export type ProviderAPIKey = {
+	id: string;
+	masked: string;
+};
+
+export type ProviderKeySettings = {
+	method: "off" | "round_robin";
+};
+
 export type ProviderInput = {
 	group: ProviderGroup;
 	catalog_id?: string;

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math"
 	"net/http"
@@ -67,6 +68,12 @@ func (h *adminHandler) routes(r chi.Router) {
 	r.Put("/providers/{name}", h.putProvider)
 	r.Delete("/providers/{name}", h.deleteProvider)
 	r.Get("/providers/{name}/catalog", h.providerCatalog)
+	r.Get("/providers/{name}/keys", h.listProviderKeys)
+	r.Post("/providers/{name}/keys", h.createProviderKey)
+	r.Put("/providers/{name}/keys/{index}", h.putProviderKey)
+	r.Delete("/providers/{name}/keys/{index}", h.deleteProviderKey)
+	r.Get("/providers/{name}/keys/settings", h.getProviderKeySettings)
+	r.Put("/providers/{name}/keys/settings", h.putProviderKeySettings)
 	r.Post("/providers/{name}/import", h.importModels)
 	r.Get("/providers/{name}/metrics", h.providerMetrics)
 
@@ -620,6 +627,178 @@ func (h *adminHandler) putProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, toProviderResponse(record, h.engine.Health()[record.Name]))
+}
+
+type providerKeyResponse struct {
+	ID     string `json:"id"`
+	Masked string `json:"masked"`
+}
+
+type providerKeyRequest struct {
+	Key string `json:"key"`
+}
+
+func maskProviderKey(key string) string {
+	key = strings.TrimSpace(key)
+	if len(key) <= 8 {
+		return strings.Repeat("•", len(key))
+	}
+	return key[:4] + strings.Repeat("•", len(key)-8) + key[len(key)-4:]
+}
+
+func providerKeyResponses(keys []string) []providerKeyResponse {
+	out := make([]providerKeyResponse, 0, len(keys))
+	for i, key := range keys {
+		out = append(out, providerKeyResponse{ID: strconv.Itoa(i), Masked: maskProviderKey(key)})
+	}
+	return out
+}
+
+func (h *adminHandler) mutateProviderKeys(w http.ResponseWriter, r *http.Request, mutate func([]string) ([]string, error)) {
+	ctx := r.Context()
+	name := urlParam(r, "name")
+	record, err := h.store.Providers().Get(ctx, name)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	keys, err := mutate(append([]string(nil), record.APIKeys...))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	if len(keys) == 0 && record.Group != string(provider.GroupCustom) {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "Provider must retain at least one API key.")
+		return
+	}
+	record.APIKeys = keys
+	record.APIKey = ""
+	if len(keys) > 0 {
+		record.APIKey = keys[0]
+	}
+	if err := h.store.Providers().Put(ctx, record); err != nil {
+		h.fail(w, err)
+		return
+	}
+	if err := h.loader.Load(ctx); err != nil {
+		h.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, providerKeyResponses(keys))
+}
+
+func (h *adminHandler) listProviderKeys(w http.ResponseWriter, r *http.Request) {
+	record, err := h.store.Providers().Get(r.Context(), urlParam(r, "name"))
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, providerKeyResponses(record.APIKeys))
+}
+
+func (h *adminHandler) createProviderKey(w http.ResponseWriter, r *http.Request) {
+	var req providerKeyRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	key := strings.TrimSpace(req.Key)
+	if key == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "Field 'key' is required.")
+		return
+	}
+	h.mutateProviderKeys(w, r, func(keys []string) ([]string, error) {
+		return append(keys, key), nil
+	})
+}
+
+func (h *adminHandler) putProviderKey(w http.ResponseWriter, r *http.Request) {
+	var req providerKeyRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	key := strings.TrimSpace(req.Key)
+	if key == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "Field 'key' is required.")
+		return
+	}
+	index, err := strconv.Atoi(urlParam(r, "index"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "Provider key id must be a numeric index.")
+		return
+	}
+	h.mutateProviderKeys(w, r, func(keys []string) ([]string, error) {
+		if index < 0 || index >= len(keys) {
+			return nil, fmt.Errorf("provider key not found")
+		}
+		keys[index] = key
+		return keys, nil
+	})
+}
+
+func (h *adminHandler) deleteProviderKey(w http.ResponseWriter, r *http.Request) {
+	index, err := strconv.Atoi(urlParam(r, "index"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "Provider key id must be a numeric index.")
+		return
+	}
+	h.mutateProviderKeys(w, r, func(keys []string) ([]string, error) {
+		if index < 0 || index >= len(keys) {
+			return nil, fmt.Errorf("provider key not found")
+		}
+		return append(keys[:index], keys[index+1:]...), nil
+	})
+}
+
+type providerKeySettingsResponse struct {
+	Method string `json:"method"`
+}
+
+type providerKeySettingsRequest struct {
+	Enabled bool `json:"enabled"`
+}
+
+func (h *adminHandler) getProviderKeySettings(w http.ResponseWriter, r *http.Request) {
+	record, err := h.store.Providers().Get(r.Context(), urlParam(r, "name"))
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	method := record.APIKeyMethod
+	if method == "" {
+		method = "off"
+	}
+	writeJSON(w, http.StatusOK, providerKeySettingsResponse{Method: method})
+}
+
+func (h *adminHandler) putProviderKeySettings(w http.ResponseWriter, r *http.Request) {
+	var req providerKeySettingsRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	ctx := r.Context()
+	record, err := h.store.Providers().Get(ctx, urlParam(r, "name"))
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	if req.Enabled && len(record.APIKeys) < 2 {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "At least two API keys are required to enable round-robin.")
+		return
+	}
+	if req.Enabled {
+		record.APIKeyMethod = "round_robin"
+	} else {
+		record.APIKeyMethod = "off"
+	}
+	if err := h.store.Providers().Put(ctx, record); err != nil {
+		h.fail(w, err)
+		return
+	}
+	if err := h.loader.Load(ctx); err != nil {
+		h.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, providerKeySettingsResponse{Method: record.APIKeyMethod})
 }
 
 // findCatalogEntry resolves a preset by id.

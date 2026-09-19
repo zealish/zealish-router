@@ -149,15 +149,38 @@ export default function ProvidersPage() {
     setSaving(true);
     try {
       await api.put(`/providers/${encodeURIComponent(draft.name)}`, {
-        group: draft.group, catalog_id: draft.catalog_id, kind: draft.kind, base_url: draft.base_url,
+        group: draft.group,
+        catalog_id: draft.catalog_id,
+        kind: draft.kind,
+        base_url: draft.base_url,
         ...(draft.api_key ? { api_key: draft.api_key } : {}),
-        ...(draft.api_keys.trim() ? { api_keys: draft.api_keys.split(/\r?\n|,/).map((v) => v.trim()).filter(Boolean) } : {}),
+        ...(draft.api_keys.trim()
+          ? {
+              api_keys: draft.api_keys
+                .split(/\r?\n|,/)
+                .map((v) => v.trim())
+                .filter(Boolean),
+            }
+          : {}),
         api_key_method: draft.api_key_method,
-        timeout_ms: Number(draft.timeout_ms), enabled: draft.enabled, alias_prefix: draft.alias_prefix.trim(),
+        timeout_ms: Number(draft.timeout_ms),
+        enabled: draft.enabled,
+        alias_prefix: draft.alias_prefix.trim(),
         use_proxy_pool: draft.use_proxy_pool,
-        breaker_threshold: draft.breaker_threshold.trim() === "" ? null : Number(draft.breaker_threshold),
-        breaker_cooldown_ms: draft.breaker_cooldown_ms.trim() === "" ? null : Number(draft.breaker_cooldown_ms),
+        breaker_threshold:
+          draft.breaker_threshold.trim() === ""
+            ? null
+            : Number(draft.breaker_threshold),
+        breaker_cooldown_ms:
+          draft.breaker_cooldown_ms.trim() === ""
+            ? null
+            : Number(draft.breaker_cooldown_ms),
       });
+      toast.success(`Saved provider '${draft.name}'.`);
+      setDraft(undefined);
+      await reload();
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : String(err));
     } finally {
       setSaving(false);
     }

@@ -334,6 +334,73 @@ func TestAdminProviderSecretNotExposed(t *testing.T) {
 	}
 }
 
+func TestAdminProviderKeyCRUDMasksSecrets(t *testing.T) {
+	h, _, _ := newAdminServer(t)
+	if rec := adminRequest(t, h, http.MethodPut, "/api/v1/providers/openai",
+		`{"base_url":"https://api.openai.com/v1","api_keys":["sk-first","sk-second"],"enabled":true}`); rec.Code != http.StatusOK {
+		t.Fatalf("create provider status = %d (body=%q)", rec.Code, rec.Body.String())
+	}
+
+	listed := decodeJSON[[]providerKeyResponse](t,
+		adminRequest(t, h, http.MethodGet, "/api/v1/providers/openai/keys", ""))
+	if len(listed) != 2 || listed[0].ID != "0" || listed[0].Masked == "sk-first" || listed[0].Masked == "" {
+		t.Fatalf("listed keys = %+v, want masked two-key list", listed)
+	}
+	if strings.Contains(mustJSON(t, listed), "sk-first") || strings.Contains(mustJSON(t, listed), "sk-second") {
+		t.Fatal("provider key list leaked a secret")
+	}
+
+	created := decodeJSON[[]providerKeyResponse](t,
+		adminRequest(t, h, http.MethodPost, "/api/v1/providers/openai/keys", `{"key":"sk-third"}`))
+	if len(created) != 3 {
+		t.Fatalf("after create = %+v, want three keys", created)
+	}
+	updated := decodeJSON[[]providerKeyResponse](t,
+		adminRequest(t, h, http.MethodPut, "/api/v1/providers/openai/keys/1", `{"key":"sk-replaced"}`))
+	if len(updated) != 3 || updated[1].Masked == listed[1].Masked {
+		t.Fatalf("after update = %+v, want changed second mask", updated)
+	}
+	deleted := decodeJSON[[]providerKeyResponse](t,
+		adminRequest(t, h, http.MethodDelete, "/api/v1/providers/openai/keys/0", ""))
+	if len(deleted) != 2 || deleted[0].ID != "0" {
+		t.Fatalf("after delete = %+v, want two reindexed keys", deleted)
+	}
+}
+
+func mustJSON(t *testing.T, value any) string {
+	t.Helper()
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+func TestAdminProviderKeyRotationSettings(t *testing.T) {
+	h, _, _ := newAdminServer(t)
+	adminRequest(t, h, http.MethodPut, "/api/v1/providers/openai",
+		`{"base_url":"https://api.openai.com/v1","api_keys":["one","two"],"enabled":true}`)
+
+	rec := adminRequest(t, h, http.MethodPut, "/api/v1/providers/openai/keys/settings", `{"enabled":true}`)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"round_robin"`) {
+		t.Fatalf("enable rotation = %d %s", rec.Code, rec.Body.String())
+	}
+	rec = adminRequest(t, h, http.MethodGet, "/api/v1/providers/openai/keys/settings", "")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"round_robin"`) {
+		t.Fatalf("get rotation = %d %s", rec.Code, rec.Body.String())
+	}
+	rec = adminRequest(t, h, http.MethodPut, "/api/v1/providers/openai/keys/settings", `{"enabled":false}`)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"off"`) {
+		t.Fatalf("disable rotation = %d %s", rec.Code, rec.Body.String())
+	}
+
+	adminRequest(t, h, http.MethodPut, "/api/v1/providers/single", `{"base_url":"https://example.test/v1","api_key":"one","enabled":true}`)
+	rec = adminRequest(t, h, http.MethodPut, "/api/v1/providers/single/keys/settings", `{"enabled":true}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("single-key enable status = %d, want 400", rec.Code)
+	}
+}
+
 func TestAdminProviderGroups(t *testing.T) {
 	h, store, _ := newAdminServer(t)
 
