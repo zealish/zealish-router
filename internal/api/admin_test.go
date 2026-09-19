@@ -14,7 +14,6 @@ import (
 
 	"github.com/zealish/zealish-router/internal/auth"
 	"github.com/zealish/zealish-router/internal/config"
-	"github.com/zealish/zealish-router/internal/extension"
 	"github.com/zealish/zealish-router/internal/metrics"
 	"github.com/zealish/zealish-router/internal/provider"
 	"github.com/zealish/zealish-router/internal/router"
@@ -45,7 +44,6 @@ func newAdminServer(t *testing.T) (http.Handler, storage.Store, *router.Engine) 
 		Auth:       auth.NewService(false, nil, nil, logger),
 		AdminAuth:  auth.NewAdminService(true, adminToken),
 		Quota:      auth.NewQuota(store.Usage()),
-		Extensions: extension.NewRegistry(store.Settings()),
 		Metrics:    collector,
 		Logger:     logger,
 	}
@@ -998,93 +996,3 @@ func TestAdminKeyAllowlistUnknownKeyReturns404(t *testing.T) {
 	}
 }
 
-func TestAdminListExtensionsDefaultsDisabled(t *testing.T) {
-	h, _, _ := newAdminServer(t)
-
-	rec := adminRequest(t, h, http.MethodGet, "/api/v1/extensions", "")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
-	list := decodeJSON[[]extension.Info](t, rec)
-	if len(list) != 2 {
-		t.Fatalf("len(list) = %d, want 2", len(list))
-	}
-	for _, info := range list {
-		if info.Enabled {
-			t.Errorf("%s enabled by default", info.ID)
-		}
-	}
-}
-
-func TestAdminPutExtensionEnablesAndPersists(t *testing.T) {
-	h, _, _ := newAdminServer(t)
-
-	rec := adminRequest(t, h, http.MethodPut, "/api/v1/extensions/sanitize",
-		`{"enabled":true,"config":{"trim_whitespace":true,"history_window":4}}`)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
-	}
-	list := decodeJSON[[]extension.Info](t, rec)
-	var got extension.Info
-	for _, info := range list {
-		if info.ID == "sanitize" {
-			got = info
-		}
-	}
-	if !got.Enabled {
-		t.Fatal("sanitize not enabled after PUT")
-	}
-
-	// A second GET reflects the persisted state.
-	rec2 := adminRequest(t, h, http.MethodGet, "/api/v1/extensions", "")
-	list2 := decodeJSON[[]extension.Info](t, rec2)
-	for _, info := range list2 {
-		if info.ID == "sanitize" && !info.Enabled {
-			t.Error("sanitize enabled flag not persisted across requests")
-		}
-	}
-}
-
-func TestAdminPutExtensionUnknownIDReturns404(t *testing.T) {
-	h, _, _ := newAdminServer(t)
-
-	rec := adminRequest(t, h, http.MethodPut, "/api/v1/extensions/nope", `{"enabled":true}`)
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("status = %d, want 404", rec.Code)
-	}
-}
-
-func TestAdminPutExtensionRejectsInvalidConfig(t *testing.T) {
-	h, _, _ := newAdminServer(t)
-
-	rec := adminRequest(t, h, http.MethodPut, "/api/v1/extensions/sanitize",
-		`{"enabled":true,"config":{"history_window":-1}}`)
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want 400", rec.Code)
-	}
-}
-
-func TestAdminExtensionsDisabledReturns404(t *testing.T) {
-	cfg := config.Default()
-	cfg.Auth.Enabled = false
-	cfg.Admin = config.Admin{Enabled: true, Token: adminToken}
-
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	collector := metrics.New()
-	store := storage.NewMemory()
-	deps := Dependencies{
-		Config:    cfg,
-		Engine:    router.NewEngine(logger, collector),
-		Store:     store,
-		Auth:      auth.NewService(false, nil, nil, logger),
-		AdminAuth: auth.NewAdminService(true, adminToken),
-		Metrics:   collector,
-		Logger:    logger,
-	}
-	h := newRoutes(deps, newHandler(deps))
-
-	rec := adminRequest(t, h, http.MethodPut, "/api/v1/extensions/sanitize", `{"enabled":true}`)
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("status = %d, want 404 when Extensions is nil", rec.Code)
-	}
-}

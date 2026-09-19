@@ -731,11 +731,11 @@ func roundRate(rate float64) float64 {
 // --- upstream model catalogue ---
 
 type catalogModelResponse struct {
-	ID            string `json:"id"`
-	OwnedBy       string `json:"owned_by,omitempty"`
-	Imported      bool   `json:"imported"`
-	Alias         string `json:"alias,omitempty"`
-	ContextWindow int    `json:"context_window"`
+	ID            string   `json:"id"`
+	OwnedBy       string   `json:"owned_by,omitempty"`
+	Imported      bool     `json:"imported"`
+	Alias         string   `json:"alias,omitempty"`
+	ContextWindow int      `json:"context_window"`
 	// Capabilities previews what importing this model would tag it with, so
 	// the operator sees the guess before committing to it.
 	Capabilities []string `json:"capabilities"`
@@ -819,18 +819,18 @@ func (h *adminHandler) importModels(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 	name := urlParam(r, "name")
-	record, err := h.store.Providers().Get(ctx, name)
+	providerRecord, err := h.store.Providers().Get(ctx, name)
 	if err != nil {
 		h.fail(w, err)
 		return
 	}
 
-	prefix := record.AliasPrefix
+	prefix := providerRecord.AliasPrefix
 	if req.Prefix != nil {
 		prefix = strings.TrimSpace(*req.Prefix)
 	}
 
-	lister, ok := h.providerClient(ctx, record).(provider.ModelLister)
+	lister, ok := h.providerClient(ctx, providerRecord).(provider.ModelLister)
 	if !ok {
 		writeError(w, http.StatusBadRequest, "invalid_request_error",
 			"Provider '"+name+"' cannot list models.")
@@ -845,6 +845,7 @@ func (h *adminHandler) importModels(w http.ResponseWriter, r *http.Request) {
 	for _, upstream := range upstreamModels {
 		upstreamContext[upstream.ID] = upstream.Context()
 	}
+
 	imported := make([]modelResponse, 0, len(req.Models))
 	skipped := make([]string, 0)
 	for _, model := range req.Models {
@@ -853,8 +854,6 @@ func (h *adminHandler) importModels(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		alias := prefix + model
-		// An alias owned by another provider is never overwritten: aliases are
-		// globally unique, so stealing one would silently reroute traffic.
 		existing, err := h.store.Models().Get(ctx, alias)
 		switch {
 		case err == nil && (existing.Provider != name || !req.Overwrite):
@@ -872,7 +871,6 @@ func (h *adminHandler) importModels(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, storage.ErrNotFound) {
 			modelRecord.Capabilities = provider.InferCapabilities(model)
 		}
-		// Keep stored limits and unrelated operator metadata on re-import.
 		if modelRecord.MaxContext <= 0 {
 			modelRecord.MaxContext = upstreamContext[model]
 		}
@@ -955,24 +953,22 @@ func (h *adminHandler) listCapabilities(w http.ResponseWriter, _ *http.Request) 
 // --- model aliases ---
 
 type modelResponse struct {
-	Alias        string          `json:"alias"`
-	Provider     string          `json:"provider"`
-	Model        string          `json:"model"`
-	Fallback     []string        `json:"fallback"`
-	Capabilities []string        `json:"capabilities"`
-	MaxContext   int             `json:"max_context"`
-	QualityTier  int             `json:"quality_tier"`
-	Pricing      storage.Pricing `json:"pricing"`
+	Alias    string   `json:"alias"`
+	Provider string   `json:"provider"`
+	Model    string   `json:"model"`
+	Fallback []string `json:"fallback"`
+	// Capabilities lists what the route serves, in canonical order.
+	Capabilities []string `json:"capabilities"`
 }
 
 type modelRequest struct {
-	Provider     string           `json:"provider"`
-	Model        string           `json:"model"`
-	Fallback     []string         `json:"fallback"`
-	Capabilities *[]string        `json:"capabilities"`
-	MaxContext   *int             `json:"max_context"`
-	QualityTier  *int             `json:"quality_tier"`
-	Pricing      *storage.Pricing `json:"pricing"`
+	Provider string   `json:"provider"`
+	Model    string   `json:"model"`
+	Fallback []string `json:"fallback"`
+	// Capabilities is optional: omitted, the set is inferred from the upstream
+	// model name. An explicit empty array clears it, so an operator can state
+	// "unknown" rather than accept the guess.
+	Capabilities *[]string `json:"capabilities"`
 }
 
 func (h *adminHandler) listAliases(w http.ResponseWriter, r *http.Request) {
@@ -999,18 +995,6 @@ func (h *adminHandler) putAlias(w http.ResponseWriter, r *http.Request) {
 			"Fields 'provider' and 'model' are required.")
 		return
 	}
-	if req.MaxContext != nil && *req.MaxContext < 0 {
-		writeError(w, http.StatusBadRequest, "invalid_request_error", "Field 'max_context' must be non-negative.")
-		return
-	}
-	if req.QualityTier != nil && (*req.QualityTier < 0 || *req.QualityTier > 100) {
-		writeError(w, http.StatusBadRequest, "invalid_request_error", "Field 'quality_tier' must be between 0 and 100.")
-		return
-	}
-	if req.Pricing != nil && (req.Pricing.Input < 0 || req.Pricing.Output < 0) {
-		writeError(w, http.StatusBadRequest, "invalid_request_error", "Pricing values must be non-negative.")
-		return
-	}
 
 	ctx := r.Context()
 	if _, err := h.store.Providers().Get(ctx, req.Provider); err != nil {
@@ -1019,12 +1003,6 @@ func (h *adminHandler) putAlias(w http.ResponseWriter, r *http.Request) {
 				"Unknown provider '"+req.Provider+"'.")
 			return
 		}
-		h.fail(w, err)
-		return
-	}
-
-	existing, err := h.store.Models().Get(ctx, urlParam(r, "alias"))
-	if err != nil && !errors.Is(err, storage.ErrNotFound) {
 		h.fail(w, err)
 		return
 	}
@@ -1040,18 +1018,6 @@ func (h *adminHandler) putAlias(w http.ResponseWriter, r *http.Request) {
 		Model:        req.Model,
 		Fallback:     req.Fallback,
 		Capabilities: capabilities,
-		MaxContext:   existing.MaxContext,
-		QualityTier:  existing.QualityTier,
-		Pricing:      existing.Pricing,
-	}
-	if req.MaxContext != nil {
-		record.MaxContext = *req.MaxContext
-	}
-	if req.QualityTier != nil {
-		record.QualityTier = *req.QualityTier
-	}
-	if req.Pricing != nil {
-		record.Pricing = *req.Pricing
 	}
 	if err := h.store.Models().Put(ctx, record); err != nil {
 		h.fail(w, err)
@@ -1161,9 +1127,11 @@ func toModelResponse(m storage.ModelAlias) modelResponse {
 		capabilities = []string{}
 	}
 	return modelResponse{
-		Alias: m.Alias, Provider: m.Provider, Model: m.Model,
-		Fallback: fallback, Capabilities: capabilities,
-		MaxContext: m.MaxContext, QualityTier: m.QualityTier, Pricing: m.Pricing,
+		Alias:        m.Alias,
+		Provider:     m.Provider,
+		Model:        m.Model,
+		Fallback:     fallback,
+		Capabilities: capabilities,
 	}
 }
 

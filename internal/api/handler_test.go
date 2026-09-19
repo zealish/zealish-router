@@ -16,7 +16,6 @@ import (
 
 	"github.com/zealish/zealish-router/internal/auth"
 	"github.com/zealish/zealish-router/internal/config"
-	"github.com/zealish/zealish-router/internal/extension"
 	"github.com/zealish/zealish-router/internal/metrics"
 	"github.com/zealish/zealish-router/internal/provider"
 	"github.com/zealish/zealish-router/internal/router"
@@ -114,34 +113,6 @@ func newTestServerWithConfig(t *testing.T, p provider.Provider, tweak func(*conf
 	return newRoutes(deps, newHandler(deps))
 }
 
-// newTestServerWithExtensions wires the same routing table with the given
-// extension registry, so a test can observe applyExtensions running before
-// dispatch.
-func newTestServerWithExtensions(t *testing.T, p provider.Provider, extensions *extension.Registry) http.Handler {
-	t.Helper()
-
-	cfg := config.Default()
-	cfg.Auth.Enabled = false
-	cfg.Admin.Enabled = false
-
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	collector := metrics.New()
-	engine := router.NewEngine(logger, collector)
-	engine.Reload([]storage.ModelAlias{
-		{Alias: "gpt-5", Provider: "openai", Model: "gpt-5-upstream"},
-	}, nil, provider.NewRegistry(p))
-
-	deps := Dependencies{
-		Config:     cfg,
-		Engine:     engine,
-		Store:      storage.NewMemory(),
-		Auth:       auth.NewService(false, nil, nil, logger),
-		Extensions: extensions,
-		Metrics:    collector,
-		Logger:     logger,
-	}
-	return newRoutes(deps, newHandler(deps))
-}
 
 func post(t *testing.T, h http.Handler, body string) *httptest.ResponseRecorder {
 	t.Helper()
@@ -465,41 +436,3 @@ func TestEmbeddingsUnsupportedDialectIsBadRequest(t *testing.T) {
 	}
 }
 
-func TestChatCompletionsAppliesEnabledExtensions(t *testing.T) {
-	registry := extension.NewRegistry(storage.NewMemory().Settings())
-	if err := registry.Update(context.Background(), extension.IDSanitize, true,
-		json.RawMessage(`{"trim_whitespace":true}`)); err != nil {
-		t.Fatalf("Update: %v", err)
-	}
-
-	p := &recordingProvider{stubProvider: stubProvider{name: "openai"}}
-	h := newTestServerWithExtensions(t, p, registry)
-
-	rec := post(t, h, `{"model":"gpt-5","messages":[{"role":"user","content":"hi   \n\n\n\n"}]}`)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
-	}
-
-	got, ok := p.got.Messages[0].Text()
-	if !ok || got != "hi" {
-		t.Errorf("upstream saw content %q, want trimmed %q", got, "hi")
-	}
-}
-
-func TestChatCompletionsSkipsExtensionsWhenDisabled(t *testing.T) {
-	registry := extension.NewRegistry(storage.NewMemory().Settings())
-
-	p := &recordingProvider{stubProvider: stubProvider{name: "openai"}}
-	h := newTestServerWithExtensions(t, p, registry)
-
-	raw := "hi   \n\n\n\n"
-	rec := post(t, h, `{"model":"gpt-5","messages":[{"role":"user","content":"hi   \n\n\n\n"}]}`)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
-	}
-
-	got, ok := p.got.Messages[0].Text()
-	if !ok || got != raw {
-		t.Errorf("upstream saw content %q, want untouched %q", got, raw)
-	}
-}
