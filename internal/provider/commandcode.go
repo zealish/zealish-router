@@ -719,6 +719,55 @@ func commandCodeUsage(e map[string]any) *openai.Usage {
 	} else {
 		u.TotalTokens = u.PromptTokens + u.CompletionTokens
 	}
+
+	// Cached tokens: try the nested prompt_tokens_details object first, then
+	// flat fields in both camelCase and snake_case.
+	if d, ok := e["prompt_tokens_details"].(map[string]any); ok {
+		ptd := &openai.PromptTokensDetails{}
+		if x, ok := d["cached_tokens"].(float64); ok {
+			ptd.CachedTokens = int(x)
+		}
+		if x, ok := d["cache_write_tokens"].(float64); ok {
+			ptd.CacheWriteTokens = int(x)
+		}
+		if ptd.CachedTokens > 0 || ptd.CacheWriteTokens > 0 {
+			u.PromptTokensDetails = ptd
+		}
+	}
+	if u.PromptTokensDetails == nil {
+		var cached, written int
+		if x, ok := e["cachedTokens"].(float64); ok {
+			cached = int(x)
+		} else if x, ok := e["cached_tokens"].(float64); ok {
+			cached = int(x)
+		} else if x, ok := e["cache_read_input_tokens"].(float64); ok {
+			cached = int(x)
+		}
+		if x, ok := e["cacheWriteTokens"].(float64); ok {
+			written = int(x)
+		} else if x, ok := e["cache_write_tokens"].(float64); ok {
+			written = int(x)
+		} else if x, ok := e["cache_creation_input_tokens"].(float64); ok {
+			written = int(x)
+		}
+		if cached > 0 || written > 0 {
+			u.PromptTokensDetails = &openai.PromptTokensDetails{CachedTokens: cached, CacheWriteTokens: written}
+		}
+	}
+
+	if d, ok := e["completion_tokens_details"].(map[string]any); ok {
+		if x, ok := d["reasoning_tokens"].(float64); ok && int(x) > 0 {
+			u.CompletionTokensDetails = &openai.CompletionTokensDetails{ReasoningTokens: int(x)}
+		}
+	}
+	if u.CompletionTokensDetails == nil {
+		if x, ok := e["reasoningTokens"].(float64); ok && int(x) > 0 {
+			u.CompletionTokensDetails = &openai.CompletionTokensDetails{ReasoningTokens: int(x)}
+		} else if x, ok := e["reasoning_tokens"].(float64); ok && int(x) > 0 {
+			u.CompletionTokensDetails = &openai.CompletionTokensDetails{ReasoningTokens: int(x)}
+		}
+	}
+
 	return u
 }
 func mergeCommandUsage(a, b *openai.Usage) *openai.Usage {
@@ -728,6 +777,19 @@ func mergeCommandUsage(a, b *openai.Usage) *openai.Usage {
 	a.PromptTokens += b.PromptTokens
 	a.CompletionTokens += b.CompletionTokens
 	a.TotalTokens += b.TotalTokens
+	if b.PromptTokensDetails != nil {
+		if a.PromptTokensDetails == nil {
+			a.PromptTokensDetails = &openai.PromptTokensDetails{}
+		}
+		a.PromptTokensDetails.CachedTokens += b.PromptTokensDetails.CachedTokens
+		a.PromptTokensDetails.CacheWriteTokens += b.PromptTokensDetails.CacheWriteTokens
+	}
+	if b.CompletionTokensDetails != nil {
+		if a.CompletionTokensDetails == nil {
+			a.CompletionTokensDetails = &openai.CompletionTokensDetails{}
+		}
+		a.CompletionTokensDetails.ReasoningTokens += b.CompletionTokensDetails.ReasoningTokens
+	}
 	return a
 }
 func mustJSON(v any) json.RawMessage { b, _ := json.Marshal(v); return b }

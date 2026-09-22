@@ -660,6 +660,100 @@ func chunkJSON(t *testing.T, id string) string {
 	return string(raw)
 }
 
+func TestCommandCodeUsageExtractsCachedTokens(t *testing.T) {
+	t.Run("camelCase_flat_fields", func(t *testing.T) {
+		u := commandCodeUsage(map[string]any{
+			"inputTokens":  float64(100),
+			"outputTokens": float64(50),
+			"cachedTokens": float64(40),
+		})
+		if u.Cached() != 40 {
+			t.Errorf("cached = %d, want 40", u.Cached())
+		}
+		if u.PromptTokens != 100 {
+			t.Errorf("prompt = %d, want 100", u.PromptTokens)
+		}
+	})
+	t.Run("snake_case_flat_fields", func(t *testing.T) {
+		u := commandCodeUsage(map[string]any{
+			"prompt_tokens":     float64(200),
+			"completion_tokens": float64(100),
+			"cached_tokens":     float64(80),
+		})
+		if u.Cached() != 80 {
+			t.Errorf("cached = %d, want 80", u.Cached())
+		}
+	})
+	t.Run("nested_prompt_tokens_details", func(t *testing.T) {
+		u := commandCodeUsage(map[string]any{
+			"inputTokens":  float64(300),
+			"outputTokens": float64(50),
+			"prompt_tokens_details": map[string]any{
+				"cached_tokens":     float64(150),
+				"cache_write_tokens": float64(10),
+			},
+		})
+		if u.Cached() != 150 {
+			t.Errorf("cached = %d, want 150", u.Cached())
+		}
+		if u.CacheWrite() != 10 {
+			t.Errorf("cache_write = %d, want 10", u.CacheWrite())
+		}
+	})
+	t.Run("openai_cache_read_write_tokens", func(t *testing.T) {
+		u := commandCodeUsage(map[string]any{
+			"inputTokens":                float64(100),
+			"outputTokens":               float64(50),
+			"cache_read_input_tokens":    float64(60),
+			"cache_creation_input_tokens": float64(20),
+		})
+		if u.Cached() != 60 {
+			t.Errorf("cached = %d, want 60", u.Cached())
+		}
+		if u.CacheWrite() != 20 {
+			t.Errorf("cache_write = %d, want 20", u.CacheWrite())
+		}
+	})
+	t.Run("no_cached_fields", func(t *testing.T) {
+		u := commandCodeUsage(map[string]any{
+			"inputTokens":  float64(100),
+			"outputTokens": float64(50),
+		})
+		if u.Cached() != 0 {
+			t.Errorf("cached = %d, want 0", u.Cached())
+		}
+		if u.PromptTokensDetails != nil {
+			t.Errorf("PromptTokensDetails = %+v, want nil", u.PromptTokensDetails)
+		}
+	})
+}
+
+func TestCommandCodeUsageExtractsReasoningTokens(t *testing.T) {
+	u := commandCodeUsage(map[string]any{
+		"inputTokens":    float64(100),
+		"outputTokens":   float64(50),
+		"reasoningTokens": float64(30),
+	})
+	if u.Reasoning() != 30 {
+		t.Errorf("reasoning = %d, want 30", u.Reasoning())
+	}
+}
+
+func TestMergeCommandUsagePreservesCachedTokens(t *testing.T) {
+	a := &openai.Usage{PromptTokens: 100, CompletionTokens: 50, PromptTokensDetails: &openai.PromptTokensDetails{CachedTokens: 40}}
+	b := &openai.Usage{PromptTokens: 200, CompletionTokens: 80, PromptTokensDetails: &openai.PromptTokensDetails{CachedTokens: 30, CacheWriteTokens: 5}}
+	merged := mergeCommandUsage(a, b)
+	if merged.PromptTokens != 300 {
+		t.Errorf("prompt = %d, want 300", merged.PromptTokens)
+	}
+	if merged.Cached() != 70 {
+		t.Errorf("cached = %d, want 70 (40+30)", merged.Cached())
+	}
+	if merged.CacheWrite() != 5 {
+		t.Errorf("cache_write = %d, want 5", merged.CacheWrite())
+	}
+}
+
 func TestCommandCodeCatalogUsesAuthoritativeCMCPrefix(t *testing.T) {
 	entries := Catalog("")
 	var found bool
