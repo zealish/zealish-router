@@ -661,27 +661,45 @@ func chunkJSON(t *testing.T, id string) string {
 }
 
 func TestCommandCodeUsageExtractsCachedTokens(t *testing.T) {
-	t.Run("camelCase_flat_fields", func(t *testing.T) {
+	t.Run("cachedInputTokens_flat", func(t *testing.T) {
+		u := commandCodeUsage(map[string]any{
+			"inputTokens":      float64(48558),
+			"outputTokens":     float64(125),
+			"cachedInputTokens": float64(48320),
+			"totalTokens":      float64(48683),
+		})
+		if u.Cached() != 48320 {
+			t.Errorf("cached = %d, want 48320", u.Cached())
+		}
+		if u.PromptTokens != 48558 {
+			t.Errorf("prompt = %d, want 48558", u.PromptTokens)
+		}
+	})
+	t.Run("inputTokenDetails_cacheReadTokens", func(t *testing.T) {
 		u := commandCodeUsage(map[string]any{
 			"inputTokens":  float64(100),
 			"outputTokens": float64(50),
-			"cachedTokens": float64(40),
-		})
-		if u.Cached() != 40 {
-			t.Errorf("cached = %d, want 40", u.Cached())
-		}
-		if u.PromptTokens != 100 {
-			t.Errorf("prompt = %d, want 100", u.PromptTokens)
-		}
-	})
-	t.Run("snake_case_flat_fields", func(t *testing.T) {
-		u := commandCodeUsage(map[string]any{
-			"prompt_tokens":     float64(200),
-			"completion_tokens": float64(100),
-			"cached_tokens":     float64(80),
+			"inputTokenDetails": map[string]any{
+				"cacheReadTokens": float64(80),
+				"noCacheTokens":   float64(20),
+			},
 		})
 		if u.Cached() != 80 {
 			t.Errorf("cached = %d, want 80", u.Cached())
+		}
+	})
+	t.Run("raw_prompt_tokens_details_fallback", func(t *testing.T) {
+		u := commandCodeUsage(map[string]any{
+			"inputTokens":  float64(300),
+			"outputTokens": float64(50),
+			"raw": map[string]any{
+				"prompt_tokens_details": map[string]any{
+					"cached_tokens": float64(250),
+				},
+			},
+		})
+		if u.Cached() != 250 {
+			t.Errorf("cached = %d, want 250", u.Cached())
 		}
 	})
 	t.Run("nested_prompt_tokens_details", func(t *testing.T) {
@@ -689,7 +707,7 @@ func TestCommandCodeUsageExtractsCachedTokens(t *testing.T) {
 			"inputTokens":  float64(300),
 			"outputTokens": float64(50),
 			"prompt_tokens_details": map[string]any{
-				"cached_tokens":     float64(150),
+				"cached_tokens":      float64(150),
 				"cache_write_tokens": float64(10),
 			},
 		})
@@ -700,18 +718,19 @@ func TestCommandCodeUsageExtractsCachedTokens(t *testing.T) {
 			t.Errorf("cache_write = %d, want 10", u.CacheWrite())
 		}
 	})
-	t.Run("openai_cache_read_write_tokens", func(t *testing.T) {
+	t.Run("canonical_takes_precedence_over_raw", func(t *testing.T) {
 		u := commandCodeUsage(map[string]any{
-			"inputTokens":                float64(100),
-			"outputTokens":               float64(50),
-			"cache_read_input_tokens":    float64(60),
-			"cache_creation_input_tokens": float64(20),
+			"inputTokens":      float64(100),
+			"outputTokens":     float64(50),
+			"cachedInputTokens": float64(60),
+			"raw": map[string]any{
+				"prompt_tokens_details": map[string]any{
+					"cached_tokens": float64(999),
+				},
+			},
 		})
 		if u.Cached() != 60 {
-			t.Errorf("cached = %d, want 60", u.Cached())
-		}
-		if u.CacheWrite() != 20 {
-			t.Errorf("cache_write = %d, want 20", u.CacheWrite())
+			t.Errorf("cached = %d, want 60 (canonical wins)", u.Cached())
 		}
 	})
 	t.Run("no_cached_fields", func(t *testing.T) {
@@ -729,14 +748,29 @@ func TestCommandCodeUsageExtractsCachedTokens(t *testing.T) {
 }
 
 func TestCommandCodeUsageExtractsReasoningTokens(t *testing.T) {
-	u := commandCodeUsage(map[string]any{
-		"inputTokens":    float64(100),
-		"outputTokens":   float64(50),
-		"reasoningTokens": float64(30),
+	t.Run("top_level_reasoningTokens", func(t *testing.T) {
+		u := commandCodeUsage(map[string]any{
+			"inputTokens":    float64(100),
+			"outputTokens":   float64(50),
+			"reasoningTokens": float64(30),
+		})
+		if u.Reasoning() != 30 {
+			t.Errorf("reasoning = %d, want 30", u.Reasoning())
+		}
 	})
-	if u.Reasoning() != 30 {
-		t.Errorf("reasoning = %d, want 30", u.Reasoning())
-	}
+	t.Run("outputTokenDetails_reasoningTokens", func(t *testing.T) {
+		u := commandCodeUsage(map[string]any{
+			"inputTokens":  float64(100),
+			"outputTokens": float64(50),
+			"outputTokenDetails": map[string]any{
+				"reasoningTokens": float64(25),
+				"textTokens":      float64(25),
+			},
+		})
+		if u.Reasoning() != 25 {
+			t.Errorf("reasoning = %d, want 25", u.Reasoning())
+		}
+	})
 }
 
 func TestMergeCommandUsagePreservesCachedTokens(t *testing.T) {

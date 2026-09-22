@@ -720,52 +720,106 @@ func commandCodeUsage(e map[string]any) *openai.Usage {
 		u.TotalTokens = u.PromptTokens + u.CompletionTokens
 	}
 
-	// Cached tokens: try the nested prompt_tokens_details object first, then
-	// flat fields in both camelCase and snake_case.
-	if d, ok := e["prompt_tokens_details"].(map[string]any); ok {
-		ptd := &openai.PromptTokensDetails{}
-		if x, ok := d["cached_tokens"].(float64); ok {
-			ptd.CachedTokens = int(x)
+	// Cached tokens.  CommandCode's canonical fields are camelCase:
+	//   cachedInputTokens, inputTokenDetails.cacheReadTokens,
+	//   inputTokenDetails.noCacheTokens, cacheWriteInputTokens,
+	//   inputTokenDetails.cacheWriteTokens.
+	// A nested raw object carrying OpenAI-style snake_case is also tried last.
+	var cached, written int
+
+	if x, ok := e["cachedInputTokens"].(float64); ok {
+		cached = int(x)
+	}
+	if x, ok := e["cacheWriteInputTokens"].(float64); ok {
+		written = int(x)
+	}
+	if d, ok := e["inputTokenDetails"].(map[string]any); ok {
+		if cached == 0 {
+			if x, ok := d["cacheReadTokens"].(float64); ok {
+				cached = int(x)
+			}
 		}
-		if x, ok := d["cache_write_tokens"].(float64); ok {
-			ptd.CacheWriteTokens = int(x)
-		}
-		if ptd.CachedTokens > 0 || ptd.CacheWriteTokens > 0 {
-			u.PromptTokensDetails = ptd
+		if written == 0 {
+			if x, ok := d["cacheWriteTokens"].(float64); ok {
+				written = int(x)
+			}
 		}
 	}
-	if u.PromptTokensDetails == nil {
-		var cached, written int
-		if x, ok := e["cachedTokens"].(float64); ok {
-			cached = int(x)
-		} else if x, ok := e["cached_tokens"].(float64); ok {
+	// Fallback: flat snake_case or OpenAI convention.
+	if cached == 0 {
+		if x, ok := e["cached_tokens"].(float64); ok {
 			cached = int(x)
 		} else if x, ok := e["cache_read_input_tokens"].(float64); ok {
 			cached = int(x)
 		}
-		if x, ok := e["cacheWriteTokens"].(float64); ok {
-			written = int(x)
-		} else if x, ok := e["cache_write_tokens"].(float64); ok {
+	}
+	if written == 0 {
+		if x, ok := e["cache_write_tokens"].(float64); ok {
 			written = int(x)
 		} else if x, ok := e["cache_creation_input_tokens"].(float64); ok {
 			written = int(x)
 		}
-		if cached > 0 || written > 0 {
-			u.PromptTokensDetails = &openai.PromptTokensDetails{CachedTokens: cached, CacheWriteTokens: written}
+	}
+	// Last resort: nested prompt_tokens_details (OpenAI schema).
+	if cached == 0 && written == 0 {
+		if d, ok := e["prompt_tokens_details"].(map[string]any); ok {
+			if x, ok := d["cached_tokens"].(float64); ok {
+				cached = int(x)
+			}
+			if x, ok := d["cache_write_tokens"].(float64); ok {
+				written = int(x)
+			}
 		}
+	}
+	// Also check the "raw" envelope CommandCode includes alongside canonical fields.
+	if cached == 0 && written == 0 {
+		if raw, ok := e["raw"].(map[string]any); ok {
+			if d, ok := raw["prompt_tokens_details"].(map[string]any); ok {
+				if x, ok := d["cached_tokens"].(float64); ok {
+					cached = int(x)
+				}
+				if x, ok := d["cache_write_tokens"].(float64); ok {
+					written = int(x)
+				}
+			}
+		}
+	}
+	if cached > 0 || written > 0 {
+		u.PromptTokensDetails = &openai.PromptTokensDetails{CachedTokens: cached, CacheWriteTokens: written}
 	}
 
-	if d, ok := e["completion_tokens_details"].(map[string]any); ok {
-		if x, ok := d["reasoning_tokens"].(float64); ok && int(x) > 0 {
-			u.CompletionTokensDetails = &openai.CompletionTokensDetails{ReasoningTokens: int(x)}
+	// Reasoning tokens.
+	var reasoning int
+	if x, ok := e["reasoningTokens"].(float64); ok {
+		reasoning = int(x)
+	} else if x, ok := e["reasoning_tokens"].(float64); ok {
+		reasoning = int(x)
+	}
+	if reasoning == 0 {
+		if d, ok := e["outputTokenDetails"].(map[string]any); ok {
+			if x, ok := d["reasoningTokens"].(float64); ok {
+				reasoning = int(x)
+			}
 		}
 	}
-	if u.CompletionTokensDetails == nil {
-		if x, ok := e["reasoningTokens"].(float64); ok && int(x) > 0 {
-			u.CompletionTokensDetails = &openai.CompletionTokensDetails{ReasoningTokens: int(x)}
-		} else if x, ok := e["reasoning_tokens"].(float64); ok && int(x) > 0 {
-			u.CompletionTokensDetails = &openai.CompletionTokensDetails{ReasoningTokens: int(x)}
+	if reasoning == 0 {
+		if d, ok := e["completion_tokens_details"].(map[string]any); ok {
+			if x, ok := d["reasoning_tokens"].(float64); ok {
+				reasoning = int(x)
+			}
 		}
+	}
+	if reasoning == 0 {
+		if raw, ok := e["raw"].(map[string]any); ok {
+			if d, ok := raw["completion_tokens_details"].(map[string]any); ok {
+				if x, ok := d["reasoning_tokens"].(float64); ok {
+					reasoning = int(x)
+				}
+			}
+		}
+	}
+	if reasoning > 0 {
+		u.CompletionTokensDetails = &openai.CompletionTokensDetails{ReasoningTokens: reasoning}
 	}
 
 	return u
