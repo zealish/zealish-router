@@ -47,6 +47,22 @@ License: Apache-2.0 · Platform: Linux, Docker
 - Admin REST API at `/api/v1` for the dashboard and tooling
 - Live reload of `config.yaml` without a restart
 
+CommandCode uses the native `/alpha/generate` NDJSON stream internally. It
+translates text, reasoning, tool calls, usage and errors to OpenAI-compatible
+responses, and closes the client stream at `finish` even if upstream stays open.
+Request translation also hoists system text, preserves `max_tokens` precedence
+over `max_output_tokens`, keeps structured tool arguments and emits
+`[image omitted]` for image blocks. The downstream SSE response emits exactly
+one `data: [DONE]` frame at EOF.
+
+Configure CommandCode with the catalogue's `kind: "openai"`, not a new
+`commandcode` kind. The native loader recognizes a provider **name** or
+`catalog_id` of `commandcode` or `cmc`; the catalogue default alias prefix is
+`cmc/`. Existing persisted `cc/` aliases remain routable, so both prefixes
+can target the native adapter. Source changes do not update a running server:
+rebuild and deploy the binary, then restart it through your normal deployment
+procedure to activate these changes. Config hot reload does not replace code.
+
 ---
 
 ## Quickstart

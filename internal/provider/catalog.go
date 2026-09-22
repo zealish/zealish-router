@@ -67,7 +67,7 @@ var catalog = []CatalogEntry{
 		Group:       GroupAPIKey,
 		Kind:        KindOpenAI,
 		BaseURL:     "https://api.commandcode.ai",
-		AliasPrefix: "cc/",
+		AliasPrefix: "cmc/",
 		Docs:        "https://commandcode.ai/docs/provider",
 	},
 	{

@@ -28,6 +28,9 @@ func newTestProvider(t *testing.T, name string, h http.HandlerFunc) (Provider, *
 	t.Cleanup(srv.Close)
 
 	opts := Options{Name: name, BaseURL: srv.URL, APIKey: "sk-test", HTTPClient: srv.Client()}
+	if name == "commandcode" {
+		return NewCommandCode(opts), srv
+	}
 	return NewOpenAI(opts), srv
 }
 
@@ -96,10 +99,8 @@ func TestCommandCodeAPIKeyConnection(t *testing.T) {
 	p, srv := newTestProvider(t, "commandcode", func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotHeaders = r.Header.Clone()
-		writeJSON(t, w, openai.ChatCompletionResponse{
-			ID: "cc-1", Object: "chat.completion", Model: "cc-model",
-			Choices: []openai.Choice{{Index: 0, Message: &openai.Message{Role: "assistant", Content: json.RawMessage(`"pong"`)}}},
-		})
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = io.WriteString(w, `{"type":"text-delta","text":"pong"}`+"\n"+`{"type":"finish"}`+"\n")
 	})
 
 	// Use the real provider-compatible base path, then verify the OpenAI route.
@@ -108,11 +109,14 @@ func TestCommandCodeAPIKeyConnection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CommandCode ChatCompletion: %v", err)
 	}
-	if resp.ID != "cc-1" {
+	if resp.ID == "" || !strings.HasPrefix(resp.ID, "chatcmpl-") {
 		t.Fatalf("response id = %q", resp.ID)
 	}
-	if gotPath != "/chat/completions" {
-		t.Errorf("path = %q, want /chat/completions", gotPath)
+	if gotPath != "/alpha/generate" {
+		t.Errorf("path = %q, want /alpha/generate", gotPath)
+	}
+	if got := gotHeaders.Get("x-session-id"); got == "" {
+		t.Error("x-session-id header is missing")
 	}
 	if got := gotHeaders.Get("Authorization"); got != "Bearer sk-test" {
 		t.Errorf("Authorization = %q, want Bearer sk-test", got)
@@ -122,9 +126,306 @@ func TestCommandCodeAPIKeyConnection(t *testing.T) {
 	}
 }
 
+func TestCommandCodeRequestSchema(t *testing.T) {
+	var payload map[string]any
+	p, _ := newTestProvider(t, "commandcode", func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode payload: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = io.WriteString(w, `{"type":"finish"}`+"\n")
+	})
+	req := testRequest()
+	req.Messages = []openai.Message{
+		{Role: "system", Content: json.RawMessage(`"rules"`)},
+		{Role: "user", Content: json.RawMessage(`"hello"`)},
+		{Role: "assistant", Content: json.RawMessage(`"checking"`), Extra: map[string]json.RawMessage{"tool_calls": json.RawMessage(`[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"city\":\"Jakarta\"}"}}]`)}},
+		{Role: "assistant", Content: json.RawMessage(`null`), Extra: map[string]json.RawMessage{"tool_calls": json.RawMessage(`[{"id":"call_2","type":"function","function":{"name":"lookup","arguments":"{}"}}]`)}},
+		{Role: "tool", Name: "lookup", Content: json.RawMessage(`"31C"`), Extra: map[string]json.RawMessage{"tool_call_id": json.RawMessage(`"call_1"`)}},
+	}
+	req.Extra = map[string]json.RawMessage{"tools": json.RawMessage(`[{"type":"function","function":{"name":"lookup","description":"find","parameters":{"type":"object"}}}]`)}
+	if _, err := p.ChatCompletion(context.Background(), req); err != nil {
+		t.Fatalf("ChatCompletion: %v", err)
+	}
+	params, ok := payload["params"].(map[string]any)
+	if !ok {
+		t.Fatalf("payload = %#v", payload)
+	}
+	if params["system"] != "rules" {
+		t.Fatalf("system = %#v", params["system"])
+	}
+	msgs := params["messages"].([]any)
+	toolOnly := msgs[2].(map[string]any)["content"].([]any)
+	if len(toolOnly) != 1 || toolOnly[0].(map[string]any)["type"] != "tool-call" {
+		t.Fatalf("tool-only assistant content = %#v, want only tool-call block", toolOnly)
+	}
+	if got := msgs[0].(map[string]any)["content"].([]any)[0].(map[string]any)["text"]; got != "hello" {
+		t.Fatalf("content text = %#v", got)
+	}
+	if got := msgs[1].(map[string]any)["content"].([]any)[1].(map[string]any)["type"]; got != "tool-call" {
+		t.Fatalf("assistant block type = %#v", got)
+	}
+	newlineReq := testRequest()
+	newlineReq.Messages = []openai.Message{{Role: "system", Content: json.RawMessage(`[{"type":"text","text":"one"},{"type":"text","text":"two"}]`)}, {Role: "user", Content: json.RawMessage(`"hello"`)}}
+	if _, err := p.ChatCompletion(context.Background(), newlineReq); err != nil {
+		t.Fatalf("newline ChatCompletion: %v", err)
+	}
+	newlineParams := payload["params"].(map[string]any)
+	if got := newlineParams["system"]; got != "one\ntwo" {
+		t.Fatalf("flattened text = %#v, want newline-separated text", got)
+	}
+	tools := params["tools"].([]any)[0].(map[string]any)
+	if tools["name"] != "lookup" || tools["input_schema"] == nil || tools["description"] != "find" {
+		t.Fatalf("tools = %#v", tools)
+	}
+	var emptyPayload map[string]any
+	pEmpty, _ := newTestProvider(t, "commandcode", func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&emptyPayload); err != nil {
+			t.Errorf("decode empty payload: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = io.WriteString(w, `{"type":"finish"}`+"\n")
+	})
+	emptyReq := testRequest()
+	emptyReq.Messages = []openai.Message{{Role: "user", Content: json.RawMessage(`[]`)}}
+	if _, err := pEmpty.ChatCompletion(context.Background(), emptyReq); err != nil {
+		t.Fatalf("empty array ChatCompletion: %v", err)
+	}
+	emptyMsgs := emptyPayload["params"].(map[string]any)["messages"].([]any)
+	emptyBlock := emptyMsgs[0].(map[string]any)["content"].([]any)
+	if len(emptyBlock) != 1 || emptyBlock[0].(map[string]any)["text"] != "" {
+		t.Fatalf("empty content blocks = %#v", emptyBlock)
+	}
+	var noDescPayload map[string]any
+	pNoDesc, _ := newTestProvider(t, "commandcode", func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&noDescPayload); err != nil {
+			t.Errorf("decode no-description payload: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = io.WriteString(w, `{"type":"finish"}`+"\n")
+	})
+	noDescReq := testRequest()
+	noDescReq.Extra = map[string]json.RawMessage{"tools": json.RawMessage(`[{"type":"function","function":{"name":"ping","parameters":{"type":"object"}}}]`)}
+	if _, err := pNoDesc.ChatCompletion(context.Background(), noDescReq); err != nil {
+		t.Fatalf("no-description ChatCompletion: %v", err)
+	}
+	noDescTool := noDescPayload["params"].(map[string]any)["tools"].([]any)[0].(map[string]any)
+	if _, ok := noDescTool["description"]; ok {
+		t.Fatalf("tool unexpectedly contains description: %#v", noDescTool)
+	}
+}
+
+func TestCommandCodePlainToolObjects(t *testing.T) {
+	var payload map[string]any
+	p, _ := newTestProvider(t, "commandcode", func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode payload: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = io.WriteString(w, `{"type":"finish"}`+"\n")
+	})
+	req := testRequest()
+	req.Extra = map[string]json.RawMessage{"tools": json.RawMessage(`[{"name":"lookup","description":"find","input_schema":{"type":"object"}},{"name":"ping","parameters":{"type":"object"}}]`)}
+	if _, err := p.ChatCompletion(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	tools := payload["params"].(map[string]any)["tools"].([]any)
+	if len(tools) != 2 || tools[0].(map[string]any)["name"] != "lookup" || tools[1].(map[string]any)["name"] != "ping" {
+		t.Fatalf("tools = %#v", tools)
+	}
+}
+
+func TestCommandCodeObjectErrorSerialization(t *testing.T) {
+	p, _ := newTestProvider(t, "commandcode", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = io.WriteString(w, `{"type":"text-delta","text":"before"}`+"\n"+`{"type":"error","error":{"message":"nested","status":429}}`+"\n")
+	})
+	resp, err := p.ChatCompletion(context.Background(), testRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, _ := resp.Choices[0].Message.Text()
+	if !strings.Contains(text, `{"message":"nested","status":429}`) {
+		t.Fatalf("text = %q", text)
+	}
+}
+
+func TestCommandCodeErrorFieldPrecedesMessage(t *testing.T) {
+	p, _ := newTestProvider(t, "commandcode", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = io.WriteString(w, `{"type":"text-delta","text":"before"}`+"\n"+`{"type":"error","error":{"code":"E","detail":"bad"},"message":"fallback"}`+"\n")
+	})
+	resp, err := p.ChatCompletion(context.Background(), testRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, _ := resp.Choices[0].Message.Text()
+	if !strings.Contains(text, `{"code":"E","detail":"bad"}`) || strings.Contains(text, "fallback") {
+		t.Fatalf("text = %q", text)
+	}
+}
+
+func TestCommandCodeObjectContentUsesJSString(t *testing.T) {
+	var payload map[string]any
+	p, _ := newTestProvider(t, "commandcode", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = io.WriteString(w, `{"type":"finish"}`+"\n")
+	})
+	req := testRequest()
+	req.Messages = []openai.Message{{Role: "user", Content: json.RawMessage(`{"foo":"bar"}`)}}
+	if _, err := p.ChatCompletion(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	content := payload["params"].(map[string]any)["messages"].([]any)[0].(map[string]any)["content"].([]any)[0].(map[string]any)["text"]
+	if content != "[object Object]" {
+		t.Fatalf("content = %#v", content)
+	}
+}
+
+func TestCommandCodePreservesExplicitEmptyToolDescription(t *testing.T) {
+	var payload map[string]any
+	p, _ := newTestProvider(t, "commandcode", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = io.WriteString(w, `{"type":"finish"}`+"\n")
+	})
+	req := testRequest()
+	req.Extra = map[string]json.RawMessage{"tools": json.RawMessage(`[{"type":"function","function":{"name":"empty","description":"","parameters":{"type":"object"}}},{"name":"absent","input_schema":{"type":"object"}}]`)}
+	if _, err := p.ChatCompletion(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	tools := payload["params"].(map[string]any)["tools"].([]any)
+	if _, ok := tools[0].(map[string]any)["description"]; !ok {
+		t.Fatal("explicit empty description was omitted")
+	}
+	if _, ok := tools[1].(map[string]any)["description"]; ok {
+		t.Fatal("absent description was added")
+	}
+}
+
+func TestCommandCodeEmptyErrorWinsOverMessage(t *testing.T) {
+	p, _ := newTestProvider(t, "commandcode", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = io.WriteString(w, `{"type":"text-delta","text":"before"}`+"\n"+`{"type":"error","error":"","message":"fallback"}`+"\n")
+	})
+	resp, err := p.ChatCompletion(context.Background(), testRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, _ := resp.Choices[0].Message.Text()
+	if !strings.Contains(text, "[CommandCode error: ]") || strings.Contains(text, "fallback") {
+		t.Fatalf("text = %q", text)
+	}
+}
+
+func TestCommandCodeNonStreamingToolCalls(t *testing.T) {
+	p, _ := newTestProvider(t, "commandcode", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = io.WriteString(w, `{"type":"tool-input-start","id":"call_1","toolName":"lookup"}`+"\n"+`{"type":"tool-input-delta","id":"call_1","delta":"{\"city\":"}`+"\n"+`{"type":"tool-input-delta","id":"call_1","delta":"\"Jakarta\"}"}`+"\n"+`{"type":"finish-step","finishReason":"tool-calls"}`+"\n"+`{"type":"finish"}`+"\n")
+	})
+	resp, err := p.ChatCompletion(context.Background(), testRequest())
+	if err != nil {
+		t.Fatalf("ChatCompletion: %v", err)
+	}
+	if resp.Choices[0].FinishReason == nil || *resp.Choices[0].FinishReason != "tool_calls" {
+		t.Fatalf("finish = %v", resp.Choices[0].FinishReason)
+	}
+	raw := resp.Choices[0].Message.Extra["tool_calls"]
+	if !strings.Contains(string(raw), `"call_1"`) || !strings.Contains(string(raw), `Jakarta`) {
+		t.Fatalf("tool_calls = %s", raw)
+	}
+}
+func TestCommandCodeLateErrorRemainsVisibleInStream(t *testing.T) {
+	p, _ := newTestProvider(t, "commandcode", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = io.WriteString(w, `{"type":"text-delta","text":"before"}`+"\n"+`{"type":"error","error":"late failure"}`+"\n")
+	})
+	ch, err := p.ChatCompletionStream(context.Background(), testRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var text string
+	for c := range ch {
+		if len(c.Choices) == 0 || c.Choices[0].Delta == nil {
+			continue
+		}
+		if s, ok := c.Choices[0].Delta.Text(); ok {
+			text += s
+		}
+	}
+	if !strings.Contains(text, "before") || !strings.Contains(text, "[CommandCode error: late failure]") {
+		t.Fatalf("stream text = %q, want visible late error", text)
+	}
+}
+
+func TestCommandCodeNonStreamingLateErrorIsVisible(t *testing.T) {
+	p, _ := newTestProvider(t, "commandcode", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = io.WriteString(w, `{"type":"text-delta","text":"before"}`+"\n"+`{"type":"error","error":"late failure"}`+"\n")
+	})
+	resp, err := p.ChatCompletion(context.Background(), testRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, _ := resp.Choices[0].Message.Text()
+	if !strings.Contains(text, "before") || !strings.Contains(text, "[CommandCode error: late failure]") {
+		t.Fatalf("response text = %q", text)
+	}
+	if resp.Choices[0].FinishReason == nil || *resp.Choices[0].FinishReason != "stop" {
+		t.Fatalf("finish = %v", resp.Choices[0].FinishReason)
+	}
+}
+
+func TestCommandCodeStreamTerminatesOnFinishAndMapsNativeUsage(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	p, _ := newTestProvider(t, "commandcode", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = io.WriteString(w, `{"type":"text-delta","text":"ok"}`+"\n"+`{"type":"finish-step","finishReason":"tool-calls","usage":{"inputTokens":2,"outputTokens":3,"totalTokens":5}}`+"\n"+`{"type":"finish"}`+"\n")
+		w.(http.Flusher).Flush()
+		<-release
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	ch, err := p.ChatCompletionStream(ctx, testRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []openai.StreamChunk
+	for len(got) < 2 {
+		select {
+		case c, ok := <-ch:
+			if !ok {
+				t.Fatalf("stream closed after %d chunks, want text + finish", len(got))
+			}
+			got = append(got, c)
+		case <-ctx.Done():
+			t.Fatal("timed out waiting for flushed CommandCode chunks")
+		}
+	}
+	select {
+	case _, ok := <-ch:
+		if ok {
+			t.Fatal("stream emitted an unexpected chunk after finish")
+		}
+		if ctx.Err() != nil {
+			t.Fatal("stream closed only after context cancellation")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("stream did not close after finish while upstream remained open")
+	}
+	last := got[len(got)-1]
+	if last.Choices[0].FinishReason == nil || *last.Choices[0].FinishReason != "tool_calls" {
+		t.Fatalf("finish = %v", last.Choices[0].FinishReason)
+	}
+	if last.Usage == nil || last.Usage.TotalTokens != 5 {
+		t.Fatalf("usage = %#v", last.Usage)
+	}
+}
+
 func TestChatCompletionStream(t *testing.T) {
 	body := "data: " + chunkJSON(t, "a") + "\n\n" +
-		": keepalive\n\n" +
 		"data: " + chunkJSON(t, "b") + "\n\n" +
 		"data: [DONE]\n\n" +
 		"data: " + chunkJSON(t, "never") + "\n\n"
@@ -289,16 +590,53 @@ func TestUpstreamErrorRedactsAPIKey(t *testing.T) {
 		t.Errorf("error = %q, want the redaction placeholder", err)
 	}
 }
+func TestCommandCodeJSONStatusError(t *testing.T) {
+	p, _ := newTestProvider(t, "commandcode", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		writeJSON(t, w, map[string]any{"error": map[string]any{"code": "429", "message": "rate limited sk-test"}})
+	})
+	_, err := p.ChatCompletion(context.Background(), testRequest())
+	if err == nil || !strings.Contains(err.Error(), "rate limited") || strings.Contains(err.Error(), "sk-test") {
+		t.Fatalf("error = %v, want nested message, redacted key", err)
+	}
+	var pe *Error
+	if !errors.As(err, &pe) || pe.Status != 429 || !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("error = %#v, want status 429/rate limited", err)
+	}
+}
+
+func TestCommandCodeNestedEventStatusString(t *testing.T) {
+	p, _ := newTestProvider(t, "commandcode", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = io.WriteString(w, `{"type":"start"}`+"\n"+`{"type":"error","error":{"status":"429","message":"rate limit exceeded"}}`+"\n")
+	})
+	_, err := p.ChatCompletion(context.Background(), testRequest())
+	if err == nil || !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("error = %v, want rate limited", err)
+	}
+	var pe *Error
+	if !errors.As(err, &pe) || pe.Status != 429 {
+		t.Fatalf("error = %#v, want status 429", err)
+	}
+}
+
+func TestCommandCodeEarlyNestedErrorUsesReadableMessage(t *testing.T) {
+	p, _ := newTestProvider(t, "commandcode", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = io.WriteString(w, `{"type":"error","error":{"message":null,"error":"Boom","statusCode":429}}`+"\n")
+	})
+	_, err := p.ChatCompletion(context.Background(), testRequest())
+	if err == nil || !strings.Contains(err.Error(), "Boom") || strings.Contains(err.Error(), `{"message":null`) {
+		t.Fatalf("error = %v, want nested error string", err)
+	}
+	var pe *Error
+	if !errors.As(err, &pe) || pe.Message != "Boom" || pe.Status != 429 || !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("error = %#v, want message Boom/status 429/rate limited", err)
+	}
+}
 
 func TestTransportErrorRedactsAPIKey(t *testing.T) {
-	// A transport error embeds the request URL; a key in it must not survive.
-	p := NewOpenAI(Options{
-		Name:       "openai",
-		BaseURL:    "http://127.0.0.1:1/sk-secret",
-		APIKey:     "sk-secret",
-		HTTPClient: &http.Client{},
-	})
-
+	p := NewOpenAI(Options{Name: "openai", BaseURL: "http://127.0.0.1:1/sk-secret", APIKey: "sk-secret", HTTPClient: &http.Client{}})
 	_, err := p.ChatCompletion(context.Background(), testRequest())
 	if err == nil {
 		t.Fatal("expected an error")
@@ -320,6 +658,22 @@ func chunkJSON(t *testing.T, id string) string {
 		t.Fatalf("marshal chunk: %v", err)
 	}
 	return string(raw)
+}
+
+func TestCommandCodeCatalogUsesAuthoritativeCMCPrefix(t *testing.T) {
+	entries := Catalog("")
+	var found bool
+	for _, entry := range entries {
+		if entry.ID == "commandcode" {
+			found = true
+			if entry.AliasPrefix != "cmc/" {
+				t.Fatalf("alias prefix = %q, want cmc/", entry.AliasPrefix)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("commandcode catalog entry missing")
+	}
 }
 
 func writeJSON(t *testing.T, w http.ResponseWriter, v any) {

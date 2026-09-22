@@ -104,7 +104,7 @@ func NewProviderClient(rec storage.Provider, pool *ProxyPool) provider.Provider 
 		APIKeyMethod: rec.APIKeyMethod,
 		HTTPClient:   client,
 	}
-	if rec.Name == "commandcode" || rec.CatalogID == "commandcode" {
+	if isCommandCodeRecord(rec) {
 		return provider.NewCommandCode(opts)
 	}
 	if rec.Group == string(provider.GroupOAuth) {
@@ -118,6 +118,14 @@ func NewProviderClient(rec storage.Provider, pool *ProxyPool) provider.Provider 
 		return provider.NewAnthropic(opts)
 	}
 	return provider.NewOpenAI(opts)
+}
+
+// isCommandCodeRecord recognizes both the canonical NextJS 9router provider
+// identity and the original catalog identity. Alias prefixes are persisted
+// separately, so both cc/ and cmc/ aliases can target this native adapter.
+func isCommandCodeRecord(rec storage.Provider) bool {
+	return rec.Name == "commandcode" || rec.Name == "cmc" ||
+		rec.CatalogID == "commandcode" || rec.CatalogID == "cmc"
 }
 
 // bearer prefixes a raw OAuth token, tolerating a token stored with the scheme

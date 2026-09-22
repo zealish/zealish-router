@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/zealish/zealish-router/internal/provider"
 	"github.com/zealish/zealish-router/internal/storage"
 )
 
@@ -66,6 +67,34 @@ func TestNewProviderClientHonoursUseProxyPool(t *testing.T) {
 	u, err := transport.Proxy(nil)
 	if err != nil || u == nil || u.Host != "proxy-a:8080" {
 		t.Errorf("Proxy() = %v, %v; want proxy-a:8080", u, err)
+	}
+}
+
+func TestCommandCodeAliasesUseNativeProvider(t *testing.T) {
+	for _, rec := range []storage.Provider{
+		{Name: "commandcode", Kind: "openai", BaseURL: "https://api.commandcode.ai"},
+		{Name: "cmc", Kind: "openai", BaseURL: "https://api.commandcode.ai"},
+		{Name: "custom", CatalogID: "commandcode", Kind: "openai", BaseURL: "https://api.commandcode.ai"},
+		{Name: "custom-cmc", CatalogID: "cmc", Kind: "openai", BaseURL: "https://api.commandcode.ai"},
+	} {
+		got := NewProviderClient(rec, NewProxyPool(nil))
+		if got.Name() != rec.Name {
+			t.Errorf("record %+v produced provider %q, want native provider named %q", rec, got.Name(), rec.Name)
+		}
+		if _, ok := got.(*provider.CommandCode); !ok {
+			t.Errorf("record %+v produced %T, want *provider.CommandCode", rec, got)
+		}
+		engine := newTestEngine(t, nil, got)
+		engine.Reload([]storage.ModelAlias{
+			{Alias: "cc/gpt-5", Provider: rec.Name, Model: "gpt-5"},
+			{Alias: "cmc/gpt-5", Provider: rec.Name, Model: "gpt-5"},
+		}, nil, provider.NewRegistry(got))
+		for _, alias := range []string{"cc/gpt-5", "cmc/gpt-5"} {
+			route, err := engine.Resolve(alias)
+			if err != nil || route.Provider != rec.Name || route.Model != "gpt-5" {
+				t.Errorf("Resolve(%q) = %+v, %v", alias, route, err)
+			}
+		}
 	}
 }
 

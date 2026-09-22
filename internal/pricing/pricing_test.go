@@ -26,6 +26,42 @@ func TestForFallsBackToFamilyPattern(t *testing.T) {
 	}
 }
 
+func TestForMatchesMimoModels(t *testing.T) {
+	// Vendor-prefixed identifiers (e.g. xiaomi/mimo-v2.6-pro) must resolve.
+	cases := []struct {
+		model string
+		in    float64
+		out   float64
+	}{
+		{"xiaomi/mimo-v2.6-pro", 0.435, 0.87},
+		{"xiaomi/mimo-v2.6-flash", 0.14, 0.28},
+		{"mimo-v2.5-pro", 0.435, 0.87},
+		{"mimo-v2.5", 0.14, 0.28},
+		{"mimo-v2-flash", 0.14, 0.28},
+	}
+	for _, tc := range cases {
+		rate, ok := For(tc.model)
+		if !ok {
+			t.Errorf("%s: no rate", tc.model)
+			continue
+		}
+		if rate.Input != tc.in || rate.Output != tc.out {
+			t.Errorf("%s: got input=%v output=%v, want input=%v output=%v", tc.model, rate.Input, rate.Output, tc.in, tc.out)
+		}
+	}
+}
+
+func TestForMimoFamilyFallback(t *testing.T) {
+	// A future mimo-v2.7-pro should hit the mimo-v2* pattern.
+	if _, ok := For("mimo-v2.7-pro"); !ok {
+		t.Error("mimo-v2.7-pro did not match a family pattern")
+	}
+	// A future mimo-v3 should hit the mimo-* catch-all.
+	if _, ok := For("mimo-v3"); !ok {
+		t.Error("mimo-v3 did not match a family pattern")
+	}
+}
+
 func TestForUnknownModelHasNoRate(t *testing.T) {
 	if _, ok := For("totally-made-up-model-xyz"); ok {
 		t.Error("unknown model resolved to a rate")
