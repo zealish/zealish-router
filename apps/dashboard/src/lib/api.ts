@@ -481,6 +481,33 @@ export type CacheStats = {
 
 export type Settings = Record<string, string>;
 
+export type Extension = {
+  id: string;
+  name: string;
+  type: string;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type SystemPromptEntry = {
+  id: string;
+  extension_id: string;
+  name: string;
+  prompt: string;
+  priority: number;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type PromptEntryInput = {
+  name: string;
+  prompt: string;
+  priority: number;
+  enabled: boolean;
+};
+
 /** Wire dialects, mirroring provider.Kinds in internal/provider/catalog.go. */
 export const PROVIDER_KINDS = ["openai", "anthropic"] as const;
 

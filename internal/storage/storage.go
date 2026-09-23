@@ -133,6 +133,18 @@ type Proxy struct {
 	Enabled bool
 }
 
+// SystemPromptEntry is one prompt injected into a system prompt injector extension.
+type SystemPromptEntry struct {
+	ID          string
+	ExtensionID string
+	Name        string
+	Prompt      string
+	Priority    int
+	Enabled     bool
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
 // APIKeyStore persists API keys.
 type APIKeyStore interface {
 	Create(ctx context.Context, key APIKey) error
@@ -178,6 +190,15 @@ type ProxyStore interface {
 	Get(ctx context.Context, name string) (Proxy, error)
 	Put(ctx context.Context, p Proxy) error
 	Delete(ctx context.Context, name string) error
+}
+
+// SystemPromptEntryStore persists system prompt entries for an extension.
+type SystemPromptEntryStore interface {
+	List(ctx context.Context, extensionID string) ([]SystemPromptEntry, error)
+	Get(ctx context.Context, id string) (SystemPromptEntry, error)
+	Put(ctx context.Context, e SystemPromptEntry) error
+	Delete(ctx context.Context, id string) error
+	DeleteByExtension(ctx context.Context, extensionID string) error
 }
 
 // SettingStore persists free-form runtime settings as key/value pairs.
@@ -381,6 +402,7 @@ type Store interface {
 	Models() ModelStore
 	Combos() ComboStore
 	Proxies() ProxyStore
+	SystemPromptEntries() SystemPromptEntryStore
 	Settings() SettingStore
 	Usage() UsageStore
 	Traces() TraceStore
@@ -393,7 +415,8 @@ type Memory struct {
 	providers *memoryProviders
 	models    *memoryModels
 	combos    *memoryCombos
-	proxies   *memoryProxies
+	proxies       *memoryProxies
+	promptEntries *memorySystemPromptEntries
 	settings  *memorySettings
 	usage     *memoryUsage
 	traces    *memoryTraces
@@ -410,7 +433,8 @@ func NewMemory() *Memory {
 		providers: &memoryProviders{items: map[string]Provider{}, models: models, combos: combos, usage: usage},
 		models:    models,
 		combos:    combos,
-		proxies:   &memoryProxies{items: map[string]Proxy{}},
+		proxies:       &memoryProxies{items: map[string]Proxy{}},
+		promptEntries: &memorySystemPromptEntries{items: map[string]SystemPromptEntry{}},
 		settings:  &memorySettings{items: map[string]string{}},
 		usage:     usage,
 		traces:    traces,
@@ -431,6 +455,9 @@ func (m *Memory) Combos() ComboStore { return m.combos }
 
 // Proxies implements Store.
 func (m *Memory) Proxies() ProxyStore { return m.proxies }
+
+// SystemPromptEntries implements Store.
+func (m *Memory) SystemPromptEntries() SystemPromptEntryStore { return m.promptEntries }
 
 // Settings implements Store.
 func (m *Memory) Settings() SettingStore { return m.settings }
@@ -1152,4 +1179,60 @@ func (s *memoryTraces) Prune(_ context.Context, before time.Time) (int64, error)
 	}
 	s.items = kept
 	return removed, nil
+}
+
+type memorySystemPromptEntries struct {
+	mu    sync.RWMutex
+	items map[string]SystemPromptEntry
+}
+
+func (s *memorySystemPromptEntries) List(_ context.Context, extensionID string) ([]SystemPromptEntry, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []SystemPromptEntry
+	for _, e := range s.items {
+		if e.ExtensionID == extensionID {
+			out = append(out, e)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Priority < out[j].Priority })
+	return out, nil
+}
+
+func (s *memorySystemPromptEntries) Get(_ context.Context, id string) (SystemPromptEntry, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	e, ok := s.items[id]
+	if !ok {
+		return SystemPromptEntry{}, ErrNotFound
+	}
+	return e, nil
+}
+
+func (s *memorySystemPromptEntries) Put(_ context.Context, e SystemPromptEntry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.items[e.ID] = e
+	return nil
+}
+
+func (s *memorySystemPromptEntries) Delete(_ context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.items[id]; !ok {
+		return ErrNotFound
+	}
+	delete(s.items, id)
+	return nil
+}
+
+func (s *memorySystemPromptEntries) DeleteByExtension(_ context.Context, extensionID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, e := range s.items {
+		if e.ExtensionID == extensionID {
+			delete(s.items, id)
+		}
+	}
+	return nil
 }

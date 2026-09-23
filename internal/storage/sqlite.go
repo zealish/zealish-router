@@ -30,7 +30,8 @@ type SQLite struct {
 	providers *sqliteProviders
 	models    *sqliteModels
 	combos    *sqliteCombos
-	proxies   *sqliteProxies
+	proxies        *sqliteProxies
+	promptEntries  *sqliteSystemPromptEntries
 	settings  *sqliteSettings
 	usage     *sqliteUsage
 	traces    *sqliteTraces
@@ -64,6 +65,16 @@ func OpenSQLite(ctx context.Context, path string) (*SQLite, error) {
 		_ = db.Close()
 		return nil, err
 	}
+
+	// Seed hardcoded extensions so FK constraints in system_prompt_entries are satisfied.
+	for _, ext := range []struct{ id, name, typ string }{
+		{"system-prompt-injector", "System Prompt Injector", "system_prompt_injector"},
+	} {
+		_, _ = db.ExecContext(ctx,
+			`INSERT OR IGNORE INTO extensions (id, name, type, enabled, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?)`,
+			ext.id, ext.name, ext.typ, time.Now().Unix(), time.Now().Unix())
+	}
+
 	return &SQLite{
 		db:        db,
 		keys:      &sqliteAPIKeys{db: db},
@@ -71,6 +82,7 @@ func OpenSQLite(ctx context.Context, path string) (*SQLite, error) {
 		models:    &sqliteModels{db: db},
 		combos:    &sqliteCombos{db: db},
 		proxies:   &sqliteProxies{db: db},
+		promptEntries: &sqliteSystemPromptEntries{db: db},
 		settings:  &sqliteSettings{db: db},
 		usage:     &sqliteUsage{db: db},
 		traces:    &sqliteTraces{db: db},
@@ -157,6 +169,9 @@ func (s *SQLite) Combos() ComboStore { return s.combos }
 
 // Proxies implements Store.
 func (s *SQLite) Proxies() ProxyStore { return s.proxies }
+
+// SystemPromptEntries implements Store.
+func (s *SQLite) SystemPromptEntries() SystemPromptEntryStore { return s.promptEntries }
 
 // Settings implements Store.
 func (s *SQLite) Settings() SettingStore { return s.settings }
@@ -1201,4 +1216,97 @@ func scanUsageEvent(src scanner) (UsageEvent, error) {
 	e.CreatedAt = time.Unix(createdAt, 0).UTC()
 	e.Duration = time.Duration(durationMS) * time.Millisecond
 	return e, nil
+}
+
+// --- system prompt entries ---
+
+type sqliteSystemPromptEntries struct {
+	db *sql.DB
+}
+
+const promptEntryColumns = `id, extension_id, name, prompt, priority, enabled, created_at, updated_at`
+
+func scanPromptEntry(src scanner) (SystemPromptEntry, error) {
+	var (
+		e         SystemPromptEntry
+		createdAt int64
+		updatedAt int64
+	)
+	if err := src.Scan(&e.ID, &e.ExtensionID, &e.Name, &e.Prompt, &e.Priority, &e.Enabled, &createdAt, &updatedAt); err != nil {
+		return SystemPromptEntry{}, err
+	}
+	e.CreatedAt = time.Unix(createdAt, 0).UTC()
+	e.UpdatedAt = time.Unix(updatedAt, 0).UTC()
+	return e, nil
+}
+
+func (s *sqliteSystemPromptEntries) List(ctx context.Context, extensionID string) ([]SystemPromptEntry, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+promptEntryColumns+` FROM system_prompt_entries WHERE extension_id = ? ORDER BY priority`,
+		extensionID)
+	if err != nil {
+		return nil, fmt.Errorf("storage: list prompt entries: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []SystemPromptEntry
+	for rows.Next() {
+		e, err := scanPromptEntry(rows)
+		if err != nil {
+			return nil, fmt.Errorf("storage: scan prompt entry: %w", err)
+		}
+		out = append(out, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("storage: list prompt entries: %w", err)
+	}
+	return out, nil
+}
+
+func (s *sqliteSystemPromptEntries) Get(ctx context.Context, id string) (SystemPromptEntry, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT `+promptEntryColumns+` FROM system_prompt_entries WHERE id = ?`, id)
+	e, err := scanPromptEntry(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return SystemPromptEntry{}, ErrNotFound
+	}
+	if err != nil {
+		return SystemPromptEntry{}, fmt.Errorf("storage: get prompt entry: %w", err)
+	}
+	return e, nil
+}
+
+func (s *sqliteSystemPromptEntries) Put(ctx context.Context, e SystemPromptEntry) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO system_prompt_entries (id, extension_id, name, prompt, priority, enabled, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET
+		   name = excluded.name,
+		   prompt = excluded.prompt,
+		   priority = excluded.priority,
+		   enabled = excluded.enabled,
+		   updated_at = excluded.updated_at`,
+		e.ID, e.ExtensionID, e.Name, e.Prompt, e.Priority, e.Enabled,
+		unixOrZero(e.CreatedAt), unixOrZero(e.UpdatedAt))
+	if err != nil {
+		return fmt.Errorf("storage: put prompt entry: %w", err)
+	}
+	return nil
+}
+
+func (s *sqliteSystemPromptEntries) Delete(ctx context.Context, id string) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM system_prompt_entries WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("storage: delete prompt entry: %w", err)
+	}
+	return affectOne(res, "delete prompt entry")
+}
+
+func (s *sqliteSystemPromptEntries) DeleteByExtension(ctx context.Context, extensionID string) error {
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM system_prompt_entries WHERE extension_id = ?`, extensionID)
+	if err != nil {
+		return fmt.Errorf("storage: delete prompt entries by extension: %w", err)
+	}
+	return nil
 }

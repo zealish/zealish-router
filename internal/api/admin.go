@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	crypto_rand "crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -91,6 +92,13 @@ func (h *adminHandler) routes(r chi.Router) {
 	r.Put("/proxies/{name}", h.putProxy)
 	r.Post("/proxies/import", h.importProxies)
 	r.Delete("/proxies/{name}", h.deleteProxy)
+
+	r.Get("/extensions", h.listExtensions)
+	r.Get("/extensions/{id}", h.getExtension)
+	r.Get("/extensions/{id}/prompt-entries", h.listPromptEntries)
+	r.Post("/extensions/{id}/prompt-entries", h.createPromptEntry)
+	r.Put("/extensions/{id}/prompt-entries/{entry_id}", h.putPromptEntry)
+	r.Delete("/extensions/{id}/prompt-entries/{entry_id}", h.deletePromptEntry)
 
 	r.Get("/cache", h.cacheStats)
 	r.Delete("/cache", h.purgeCache)
@@ -1743,6 +1751,167 @@ func buildProxyURL(host, port, user, pass string) (*url.URL, bool) {
 		u.User = url.UserPassword(user, pass)
 	}
 	return u, true
+}
+
+// --- extensions ---
+
+type extensionResponse struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Type      string `json:"type"`
+	Enabled   bool   `json:"enabled"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+type promptEntryResponse struct {
+	ID          string `json:"id"`
+	ExtensionID string `json:"extension_id"`
+	Name        string `json:"name"`
+	Prompt      string `json:"prompt"`
+	Priority    int    `json:"priority"`
+	Enabled     bool   `json:"enabled"`
+	CreatedAt   string `json:"created_at"`
+	UpdatedAt   string `json:"updated_at"`
+}
+
+type promptEntryRequest struct {
+	Name     string `json:"name"`
+	Prompt   string `json:"prompt"`
+	Priority *int   `json:"priority"`
+	Enabled  *bool  `json:"enabled"`
+}
+
+var hardcodedExtensions = []extensionResponse{
+	{
+		ID:      "system-prompt-injector",
+		Name:    "System Prompt Injector",
+		Type:    "system_prompt_injector",
+		Enabled: true,
+	},
+}
+
+func toPromptEntryResponse(e storage.SystemPromptEntry) promptEntryResponse {
+	return promptEntryResponse{
+		ID:          e.ID,
+		ExtensionID: e.ExtensionID,
+		Name:        e.Name,
+		Prompt:      e.Prompt,
+		Priority:    e.Priority,
+		Enabled:     e.Enabled,
+		CreatedAt:   e.CreatedAt.Format(time.RFC3339),
+		UpdatedAt:   e.UpdatedAt.Format(time.RFC3339),
+	}
+}
+
+func newID() string {
+	b := make([]byte, 16)
+	_, _ = crypto_rand.Read(b)
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
+}
+
+func (h *adminHandler) listExtensions(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, hardcodedExtensions)
+}
+
+func (h *adminHandler) getExtension(w http.ResponseWriter, r *http.Request) {
+	id := urlParam(r, "id")
+	for _, e := range hardcodedExtensions {
+		if e.ID == id {
+			writeJSON(w, http.StatusOK, e)
+			return
+		}
+	}
+	writeError(w, http.StatusNotFound, "invalid_request_error", "Extension not found.")
+}
+
+func (h *adminHandler) listPromptEntries(w http.ResponseWriter, r *http.Request) {
+	entries, err := h.store.SystemPromptEntries().List(r.Context(), urlParam(r, "id"))
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	out := make([]promptEntryResponse, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, toPromptEntryResponse(e))
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (h *adminHandler) createPromptEntry(w http.ResponseWriter, r *http.Request) {
+	var req promptEntryRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "Field 'name' is required.")
+		return
+	}
+	if req.Prompt == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "Field 'prompt' is required.")
+		return
+	}
+	extensionID := urlParam(r, "id")
+	now := time.Now().UTC()
+	priority := 0
+	if req.Priority != nil {
+		priority = *req.Priority
+	}
+	e := storage.SystemPromptEntry{
+		ID:          newID(),
+		ExtensionID: extensionID,
+		Name:        req.Name,
+		Prompt:      req.Prompt,
+		Priority:    priority,
+		Enabled:     req.Enabled == nil || *req.Enabled,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	if err := h.store.SystemPromptEntries().Put(r.Context(), e); err != nil {
+		h.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, toPromptEntryResponse(e))
+}
+
+func (h *adminHandler) putPromptEntry(w http.ResponseWriter, r *http.Request) {
+	var req promptEntryRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	ctx := r.Context()
+	entryID := urlParam(r, "entry_id")
+	existing, err := h.store.SystemPromptEntries().Get(ctx, entryID)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	if req.Name != "" {
+		existing.Name = req.Name
+	}
+	if req.Prompt != "" {
+		existing.Prompt = req.Prompt
+	}
+	if req.Priority != nil {
+		existing.Priority = *req.Priority
+	}
+	if req.Enabled != nil {
+		existing.Enabled = *req.Enabled
+	}
+	existing.UpdatedAt = time.Now().UTC()
+	if err := h.store.SystemPromptEntries().Put(ctx, existing); err != nil {
+		h.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toPromptEntryResponse(existing))
+}
+
+func (h *adminHandler) deletePromptEntry(w http.ResponseWriter, r *http.Request) {
+	if err := h.store.SystemPromptEntries().Delete(r.Context(), urlParam(r, "entry_id")); err != nil {
+		h.fail(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // --- usage ---
