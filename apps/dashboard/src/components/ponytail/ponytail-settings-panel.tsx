@@ -2,9 +2,6 @@
 
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { BarChart3, ExternalLink } from "lucide-react";
-import Link from "next/link";
-import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -20,7 +17,7 @@ import { Switch } from "@/components/ui/switch";
 import { api, ApiError, type PonytailSettings } from "@/lib/api";
 import { useResource } from "@/lib/use-resource";
 
-export default function PonytailSettingsPage() {
+export default function PonytailSettingsPanel() {
   const { data, error, reload } = useResource<PonytailSettings>(
     "/ponytail/settings",
   );
@@ -89,20 +86,6 @@ export default function PonytailSettingsPage() {
 
   return (
     <>
-      <PageHeader
-        title="Ponytail"
-        description="Context optimization settings."
-        action={
-          <Button variant="outline" size="sm" asChild>
-            <Link href="/ponytail/analytics">
-              <BarChart3 className="mr-1.5 size-3.5" />
-              Analytics
-              <ExternalLink className="ml-1 size-3" />
-            </Link>
-          </Button>
-        }
-      />
-
       {error ? <p className="text-destructive text-sm">{error}</p> : null}
 
       <Card>

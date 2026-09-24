@@ -36,9 +36,18 @@ import {
   type SystemPromptEntry,
 } from "@/lib/api";
 import { useResource } from "@/lib/use-resource";
+import {
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import PonytailSettingsPanel from "@/components/ponytail/ponytail-settings-panel";
+import PonytailAnalyticsPanel from "@/components/ponytail/ponytail-analytics-panel";
 
 const EXTENSION_TYPES: { value: string; label: string }[] = [
   { value: "system_prompt_injector", label: "System Prompt Injector" },
+  { value: "context_optimizer", label: "Context Optimizer" },
 ];
 
 type EntryDraft = {
@@ -208,10 +217,12 @@ export default function ExtensionDetailPage() {
         title={extension?.name ?? "Extension"}
         description={typeLabel}
         action={
-          <Button onClick={openAdd}>
-            <Plus />
-            Add Prompt
-          </Button>
+          extension?.type !== "context_optimizer" ? (
+            <Button onClick={openAdd}>
+              <Plus />
+              Add Prompt
+            </Button>
+          ) : undefined
         }
       />
 
@@ -237,128 +248,157 @@ export default function ExtensionDetailPage() {
         </div>
       ) : null}
 
-      <DataTable
-        columns={columns}
-        data={entryList}
-        searchKey="name"
-        searchPlaceholder="Filter prompts..."
-        defaultSorting={[{ id: "priority", desc: true }]}
-        empty="No prompt entries yet."
-      />
+      {extension?.type === "context_optimizer" ? (
+        <div className="space-y-6">
+          <Card>
+            <CardHeader>
+              <CardTitle>Ponytail Settings</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <PonytailSettingsPanel />
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader>
+              <CardTitle>Ponytail Analytics</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <PonytailAnalyticsPanel />
+            </CardContent>
+          </Card>
+        </div>
+      ) : (
+        <>
+          <DataTable
+            columns={columns}
+            data={entryList}
+            searchKey="name"
+            searchPlaceholder="Filter prompts..."
+            defaultSorting={[{ id: "priority", desc: true }]}
+            empty="No prompt entries yet."
+          />
 
-      {/* Delete confirmation */}
-      <Dialog
-        open={deleting !== undefined}
-        onOpenChange={(open) => !open && setDeleting(undefined)}
-      >
-        <DialogContent className="sm:max-w-sm">
-          <DialogHeader>
-            <DialogTitle>Delete prompt entry</DialogTitle>
-            <DialogDescription>
-              Delete prompt &lsquo;{deleting?.name}&rsquo;? This cannot be
-              undone.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleting(undefined)}>
-              Cancel
-            </Button>
-            <Button
-              variant="destructive"
-              onClick={() => deleting && remove(deleting)}
-            >
-              <Trash2 />
-              Delete
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+          {/* Delete confirmation */}
+          <Dialog
+            open={deleting !== undefined}
+            onOpenChange={(open) => !open && setDeleting(undefined)}
+          >
+            <DialogContent className="sm:max-w-sm">
+              <DialogHeader>
+                <DialogTitle>Delete prompt entry</DialogTitle>
+                <DialogDescription>
+                  Delete prompt &lsquo;{deleting?.name}&rsquo;? This cannot be
+                  undone.
+                </DialogDescription>
+              </DialogHeader>
+              <DialogFooter>
+                <Button
+                  variant="outline"
+                  onClick={() => setDeleting(undefined)}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  variant="destructive"
+                  onClick={() => deleting && remove(deleting)}
+                >
+                  <Trash2 />
+                  Delete
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
 
-      {/* Add / Edit dialog */}
-      <Dialog
-        open={draft !== undefined}
-        onOpenChange={(open) => !open && setDraft(undefined)}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>
-              {editing ? `Edit ${draft?.name}` : "Add prompt entry"}
-            </DialogTitle>
-            <DialogDescription>
-              Configure a system prompt injector entry.
-            </DialogDescription>
-          </DialogHeader>
+          {/* Add / Edit dialog */}
+          <Dialog
+            open={draft !== undefined}
+            onOpenChange={(open) => !open && setDraft(undefined)}
+          >
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>
+                  {editing ? `Edit ${draft?.name}` : "Add prompt entry"}
+                </DialogTitle>
+                <DialogDescription>
+                  Configure a system prompt injector entry.
+                </DialogDescription>
+              </DialogHeader>
 
-          {draft ? (
-            <form
-              id="prompt-form"
-              className="space-y-4"
-              onSubmit={(e) => {
-                e.preventDefault();
-                void save();
-              }}
-            >
-              <div className="space-y-2">
-                <Label htmlFor="prompt-name">Name</Label>
-                <Input
-                  id="prompt-name"
-                  value={draft.name}
-                  required
-                  onChange={(e) =>
-                    setDraft({ ...draft, name: e.target.value })
-                  }
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="prompt-text">Prompt</Label>
-                <Textarea
-                  id="prompt-text"
-                  value={draft.prompt}
-                  rows={4}
-                  required
-                  onChange={(e) =>
-                    setDraft({ ...draft, prompt: e.target.value })
-                  }
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="priority">Priority</Label>
-                <Input
-                  id="priority"
-                  type="number"
-                  value={draft.priority}
-                  onChange={(e) =>
-                    setDraft({ ...draft, priority: Number(e.target.value) })
-                  }
-                />
-              </div>
-              <div className="flex items-center gap-3">
-                <Switch
-                  id="entry-enabled"
-                  checked={draft.enabled}
-                  onCheckedChange={(enabled) =>
-                    setDraft({ ...draft, enabled })
-                  }
-                />
-                <Label htmlFor="entry-enabled">Enabled</Label>
-              </div>
-            </form>
-          ) : null}
+              {draft ? (
+                <form
+                  id="prompt-form"
+                  className="space-y-4"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    void save();
+                  }}
+                >
+                  <div className="space-y-2">
+                    <Label htmlFor="prompt-name">Name</Label>
+                    <Input
+                      id="prompt-name"
+                      value={draft.name}
+                      required
+                      onChange={(e) =>
+                        setDraft({ ...draft, name: e.target.value })
+                      }
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="prompt-text">Prompt</Label>
+                    <Textarea
+                      id="prompt-text"
+                      value={draft.prompt}
+                      rows={4}
+                      required
+                      onChange={(e) =>
+                        setDraft({ ...draft, prompt: e.target.value })
+                      }
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="priority">Priority</Label>
+                    <Input
+                      id="priority"
+                      type="number"
+                      value={draft.priority}
+                      onChange={(e) =>
+                        setDraft({
+                          ...draft,
+                          priority: Number(e.target.value),
+                        })
+                      }
+                    />
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <Switch
+                      id="entry-enabled"
+                      checked={draft.enabled}
+                      onCheckedChange={(enabled) =>
+                        setDraft({ ...draft, enabled })
+                      }
+                    />
+                    <Label htmlFor="entry-enabled">Enabled</Label>
+                  </div>
+                </form>
+              ) : null}
 
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setDraft(undefined)}
-              type="button"
-            >
-              Cancel
-            </Button>
-            <Button type="submit" form="prompt-form" disabled={saving}>
-              Save
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+              <DialogFooter>
+                <Button
+                  variant="outline"
+                  onClick={() => setDraft(undefined)}
+                  type="button"
+                >
+                  Cancel
+                </Button>
+                <Button type="submit" form="prompt-form" disabled={saving}>
+                  Save
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+        </>
+      )}
     </>
   );
 }

@@ -16,6 +16,7 @@ import { useResource } from "@/lib/use-resource";
 
 const TYPE_LABELS: Record<string, string> = {
   system_prompt_injector: "System Prompt Injector",
+  context_optimizer: "Context Optimizer",
 };
 
 export default function ExtensionsPage() {

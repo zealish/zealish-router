@@ -2338,6 +2338,22 @@ func (h *adminHandler) putPonytailSettings(w http.ResponseWriter, r *http.Reques
 	put("deduplicate", strconv.FormatBool(req.Deduplicate))
 	put("metadata", strconv.FormatBool(req.Metadata))
 
+	// Hot-reload the running processor so the change takes effect immediately.
+	if h.ponytail != nil {
+		cfg := ponytail.Config{
+			Enabled:         req.Enabled,
+			Mode:            req.Mode,
+			ProtectedWindow: req.ProtectedWindow,
+			Metadata:        req.Metadata,
+		}
+		cfg.Thresholds.MinInputTokens = req.MinInputTokens
+		cfg.Thresholds.MinMessages = req.MinMessages
+		cfg.Compression.Conversation = req.CompressConv
+		cfg.Compression.Code = req.CompressCode
+		cfg.Compression.Deduplicate = req.Deduplicate
+		h.ponytail.SetConfig(cfg)
+	}
+
 	h.getPonytailSettings(w, r)
 }
 

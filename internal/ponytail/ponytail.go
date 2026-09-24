@@ -69,6 +69,7 @@ type Metadata struct {
 // Processor is the ponytail context optimizer. It is safe for concurrent use.
 type Processor struct {
 	logger *slog.Logger
+	mu     sync.RWMutex
 	config Config
 }
 
@@ -80,13 +81,28 @@ func NewProcessor(logger *slog.Logger, config Config) *Processor {
 	}
 }
 
+// SetConfig hot-swaps the processor configuration. It is safe to call from the
+// admin API after persisting the new settings to the database.
+func (p *Processor) SetConfig(cfg Config) {
+	p.mu.Lock()
+	p.config = cfg
+	p.mu.Unlock()
+	p.logger.Info("ponytail config updated",
+		slog.Bool("enabled", cfg.Enabled),
+		slog.String("mode", cfg.Mode))
+}
+
 // Enabled reports whether the processor's global configuration has ponytail enabled.
 func (p *Processor) Enabled() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	return p.config.Enabled
 }
 
 // Mode returns the configured compression mode.
 func (p *Processor) Mode() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	return p.config.Mode
 }
 
@@ -145,11 +161,15 @@ func (s *Stats) Snapshot() Stats {
 func (p *Processor) Process(ctx context.Context, messages []Message) (*Result, error) {
 	start := time.Now()
 
+	p.mu.RLock()
+	cfg := p.config
+	p.mu.RUnlock()
+
 	// Step 1: Estimate original tokens.
 	originalTokens := estimateTokensFromMessages(messages)
 
 	// Step 2: Check eligibility.
-	if !p.isEligible(messages, originalTokens) {
+	if !cfg.isEligible(messages, originalTokens) {
 		return &Result{
 			Messages:        messages,
 			OriginalTokens:  originalTokens,
@@ -161,29 +181,29 @@ func (p *Processor) Process(ctx context.Context, messages []Message) (*Result, e
 	copy(optimized, messages)
 
 	// Step 3: Dedup.
-	if p.config.Compression.Deduplicate {
+	if cfg.Compression.Deduplicate {
 		optimized = dedupMessages(optimized)
 	}
 
 	// Step 4 & 5: Rank and filter by budget.
 	// Use a token budget based on the mode.
-	budget := p.tokenBudget(originalTokens)
-	protected := p.config.ProtectedWindow
+	budget := cfg.tokenBudget(originalTokens)
+	protected := cfg.ProtectedWindow
 
 	scored := rankMessages(optimized)
 	optimized = filterByBudget(optimized, scored, budget, protected)
 
 	// Step 6: Compress messages outside protected window.
-	if p.config.Compression.Conversation {
-		optimized = compressConversation(optimized, protected, p.config.Mode)
+	if cfg.Compression.Conversation {
+		optimized = compressConversation(optimized, protected, cfg.Mode)
 	}
 
 	// Step 7: Compress code blocks.
-	if p.config.Compression.Code {
+	if cfg.Compression.Code {
 		for i, m := range optimized {
 			text, ok := extractMessageText(m)
 			if ok && text != "" {
-				compressed := compressCodeBlocks(text, p.config.Mode)
+				compressed := compressCodeBlocks(text, cfg.Mode)
 				if compressed != text {
 					optimized[i].Content = marshalText(compressed)
 				}
@@ -199,19 +219,19 @@ func (p *Processor) Process(ctx context.Context, messages []Message) (*Result, e
 		slog.Int("original_tokens", originalTokens),
 		slog.Int("optimized_tokens", optimizedTokens),
 		slog.Int("saved_tokens", originalTokens-optimizedTokens),
-		slog.String("mode", p.config.Mode),
+		slog.String("mode", cfg.Mode),
 		slog.Duration("elapsed", elapsed),
 	)
 
 	var meta *Metadata
-	if p.config.Metadata {
+	if cfg.Metadata {
 		ratio := 1.0
 		if originalTokens > 0 {
 			ratio = float64(optimizedTokens) / float64(originalTokens)
 		}
 		meta = &Metadata{
 			Enabled:          true,
-			Mode:             p.config.Mode,
+			Mode:             cfg.Mode,
 			SavedTokens:      originalTokens - optimizedTokens,
 			CompressionRatio: ratio,
 		}
@@ -228,11 +248,11 @@ func (p *Processor) Process(ctx context.Context, messages []Message) (*Result, e
 // isEligible checks whether the request meets the minimum thresholds for
 // optimization. A request must have enough tokens AND enough messages.
 // Additional heuristic checks for attached docs and duplicated context.
-func (p *Processor) isEligible(messages []Message, tokenCount int) bool {
-	if tokenCount < p.config.Thresholds.MinInputTokens {
+func (c Config) isEligible(messages []Message, tokenCount int) bool {
+	if tokenCount < c.Thresholds.MinInputTokens {
 		return false
 	}
-	if len(messages) < p.config.Thresholds.MinMessages {
+	if len(messages) < c.Thresholds.MinMessages {
 		return false
 	}
 	return true
@@ -240,9 +260,9 @@ func (p *Processor) isEligible(messages []Message, tokenCount int) bool {
 
 // tokenBudget returns the target token count after optimization. The budget
 // is a fraction of the original based on the compression mode.
-func (p *Processor) tokenBudget(originalTokens int) int {
+func (c Config) tokenBudget(originalTokens int) int {
 	var ratio float64
-	switch p.config.Mode {
+	switch c.Mode {
 	case "conservative":
 		ratio = 0.85
 	case "balanced":

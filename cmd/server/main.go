@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -267,11 +268,47 @@ func serve(cfg *config.Config, configPath string, logger *slog.Logger) error {
 	ponyCfg.Compression.Deduplicate = cfg.Ponytail.Compression.Deduplicate
 	ponyProcessor := ponytail.NewProcessor(logger, ponyCfg)
 	ponyStats := &ponytail.Stats{}
-	if cfg.Ponytail.Enabled {
+
+	// Load persisted ponytail settings from the database, overriding YAML defaults.
+	// This ensures dashboard toggles survive service restarts.
+	if all, err := store.Settings().All(ctx); err == nil {
+		loadBool := func(key string, fallback bool) bool {
+			if v, ok := all["ponytail."+key]; ok && v != "" {
+				return v == "true"
+			}
+			return fallback
+		}
+		loadInt := func(key string, fallback int) int {
+			if v, ok := all["ponytail."+key]; ok && v != "" {
+				if n, err := strconv.Atoi(v); err == nil && n > 0 {
+					return n
+				}
+			}
+			return fallback
+		}
+		loadStr := func(key, fallback string) string {
+			if v, ok := all["ponytail."+key]; ok && v != "" {
+				return v
+			}
+			return fallback
+		}
+		dbCfg := ponytail.Config{
+			Enabled:         loadBool("enabled", ponyCfg.Enabled),
+			Mode:            loadStr("mode", ponyCfg.Mode),
+			ProtectedWindow: loadInt("protected_window", ponyCfg.ProtectedWindow),
+			Metadata:        loadBool("metadata", ponyCfg.Metadata),
+		}
+		dbCfg.Thresholds.MinInputTokens = loadInt("min_input_tokens", ponyCfg.Thresholds.MinInputTokens)
+		dbCfg.Thresholds.MinMessages = loadInt("min_messages", ponyCfg.Thresholds.MinMessages)
+		dbCfg.Compression.Conversation = loadBool("compress_conversation", ponyCfg.Compression.Conversation)
+		dbCfg.Compression.Code = loadBool("compress_code", ponyCfg.Compression.Code)
+		dbCfg.Compression.Deduplicate = loadBool("deduplicate", ponyCfg.Compression.Deduplicate)
+		ponyProcessor.SetConfig(dbCfg)
+	}
+
+	if ponyProcessor.Enabled() {
 		logger.Info("ponytail context optimizer enabled",
-			slog.String("mode", cfg.Ponytail.Mode),
-			slog.Int("min_input_tokens", cfg.Ponytail.Thresholds.MinInputTokens),
-			slog.Int("protected_window", cfg.Ponytail.ProtectedWindow))
+			slog.String("mode", ponyProcessor.Mode()))
 	}
 
 	server := api.NewServer(api.Dependencies{
