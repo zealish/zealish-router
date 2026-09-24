@@ -20,6 +20,7 @@ import (
 	"github.com/zealish/zealish-router/internal/cache"
 	"github.com/zealish/zealish-router/internal/config"
 	"github.com/zealish/zealish-router/internal/metrics"
+	"github.com/zealish/zealish-router/internal/ponytail"
 	"github.com/zealish/zealish-router/internal/router"
 	"github.com/zealish/zealish-router/internal/storage"
 )
@@ -252,17 +253,40 @@ func serve(cfg *config.Config, configPath string, logger *slog.Logger) error {
 			slog.Int("max_entries", cfg.Cache.MaxEntries))
 	}
 
+	// Ponytail: request-level context optimization.
+	ponyCfg := ponytail.Config{
+		Enabled:         cfg.Ponytail.Enabled,
+		Mode:            cfg.Ponytail.Mode,
+		ProtectedWindow: cfg.Ponytail.ProtectedWindow,
+		Metadata:        cfg.Ponytail.Metadata,
+	}
+	ponyCfg.Thresholds.MinInputTokens = cfg.Ponytail.Thresholds.MinInputTokens
+	ponyCfg.Thresholds.MinMessages = cfg.Ponytail.Thresholds.MinMessages
+	ponyCfg.Compression.Conversation = cfg.Ponytail.Compression.Conversation
+	ponyCfg.Compression.Code = cfg.Ponytail.Compression.Code
+	ponyCfg.Compression.Deduplicate = cfg.Ponytail.Compression.Deduplicate
+	ponyProcessor := ponytail.NewProcessor(logger, ponyCfg)
+	ponyStats := &ponytail.Stats{}
+	if cfg.Ponytail.Enabled {
+		logger.Info("ponytail context optimizer enabled",
+			slog.String("mode", cfg.Ponytail.Mode),
+			slog.Int("min_input_tokens", cfg.Ponytail.Thresholds.MinInputTokens),
+			slog.Int("protected_window", cfg.Ponytail.ProtectedWindow))
+	}
+
 	server := api.NewServer(api.Dependencies{
-		Config:    cfg,
-		Engine:    engine,
-		Loader:    loader,
-		Store:     store,
-		Auth:      authenticator,
-		AdminAuth: adminAuth,
-		Quota:     quota,
-		Cache:     responses,
-		Metrics:   collector,
-		Logger:    logger,
+		Config:        cfg,
+		Engine:        engine,
+		Loader:        loader,
+		Store:         store,
+		Auth:          authenticator,
+		AdminAuth:     adminAuth,
+		Quota:         quota,
+		Cache:         responses,
+		Metrics:       collector,
+		Logger:        logger,
+		Ponytail:      ponyProcessor,
+		PonytailStats: ponyStats,
 	})
 
 	// Routing lives in the database, so a configuration reload only refreshes

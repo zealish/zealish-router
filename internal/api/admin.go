@@ -19,6 +19,7 @@ import (
 	"github.com/zealish/zealish-router/internal/auth"
 	"github.com/zealish/zealish-router/internal/cache"
 	"github.com/zealish/zealish-router/internal/metrics"
+	"github.com/zealish/zealish-router/internal/ponytail"
 	"github.com/zealish/zealish-router/internal/provider"
 	"github.com/zealish/zealish-router/internal/router"
 	"github.com/zealish/zealish-router/internal/storage"
@@ -29,20 +30,23 @@ import (
 // configuration: every mutation writes to storage and then republishes the
 // engine's routing table, so the database stays the single source of truth.
 type adminHandler struct {
-	store   storage.Store
-	loader  *router.Loader
-	engine  *router.Engine
-	metrics *metrics.Metrics
-	quota   *auth.Quota
-	cache   *cache.Cache
-	logger  *slog.Logger
-	active  *activeRequests
+	store         storage.Store
+	loader        *router.Loader
+	engine        *router.Engine
+	metrics       *metrics.Metrics
+	quota         *auth.Quota
+	cache         *cache.Cache
+	logger        *slog.Logger
+	active        *activeRequests
+	ponytail      *ponytail.Processor
+	ponytailStats *ponytail.Stats
 }
 
 func newAdminHandler(deps Dependencies, active *activeRequests) *adminHandler {
 	return &adminHandler{
 		store: deps.Store, loader: deps.Loader, engine: deps.Engine, metrics: deps.Metrics,
 		quota: deps.Quota, cache: deps.Cache, logger: deps.Logger, active: active,
+		ponytail: deps.Ponytail, ponytailStats: deps.PonytailStats,
 	}
 }
 
@@ -105,6 +109,10 @@ func (h *adminHandler) routes(r chi.Router) {
 
 	r.Get("/settings", h.listSettings)
 	r.Put("/settings", h.putSettings)
+
+	r.Get("/ponytail/settings", h.getPonytailSettings)
+	r.Put("/ponytail/settings", h.putPonytailSettings)
+	r.Get("/ponytail/analytics", h.getPonytailAnalytics)
 }
 
 // --- cache ---
@@ -1789,6 +1797,12 @@ var hardcodedExtensions = []extensionResponse{
 		Type:    "system_prompt_injector",
 		Enabled: true,
 	},
+	{
+		ID:      "ponytail",
+		Name:    "Ponytail",
+		Type:    "context_optimizer",
+		Enabled: true,
+	},
 }
 
 func toPromptEntryResponse(e storage.SystemPromptEntry) promptEntryResponse {
@@ -2224,6 +2238,135 @@ func (h *adminHandler) putSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	h.listSettings(w, r)
+}
+
+// --- ponytail ---
+
+type ponytailSettingsResponse struct {
+	Enabled          bool   `json:"enabled"`
+	Mode             string `json:"mode"`
+	MinInputTokens   int    `json:"min_input_tokens"`
+	MinMessages      int    `json:"min_messages"`
+	ProtectedWindow  int    `json:"protected_window"`
+	CompressConv     bool   `json:"compress_conversation"`
+	CompressCode     bool   `json:"compress_code"`
+	Deduplicate      bool   `json:"deduplicate"`
+	Metadata         bool   `json:"metadata"`
+}
+
+type ponytailAnalyticsResponse struct {
+	RequestsOptimized int64   `json:"requests_optimized"`
+	TotalTokensSaved  int64   `json:"total_tokens_saved"`
+	TotalOriginal     int64   `json:"total_original"`
+	TotalOptimized    int64   `json:"total_optimized"`
+	TotalDurationMs   int64   `json:"total_duration_ms"`
+	AvgCompression    float64 `json:"avg_compression_ratio"`
+	AvgSavedPerReq    float64 `json:"avg_saved_per_request"`
+	AvgDurationMs     float64 `json:"avg_duration_ms"`
+}
+
+func (h *adminHandler) getPonytailSettings(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	all, err := h.store.Settings().All(ctx)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+
+	getBool := func(key string, fallback bool) bool {
+		v, ok := all["ponytail."+key]
+		if !ok || v == "" {
+			return fallback
+		}
+		return v == "true"
+	}
+	getInt := func(key string, fallback int) int {
+		v, ok := all["ponytail."+key]
+		if !ok || v == "" {
+			return fallback
+		}
+		n, _ := strconv.Atoi(v)
+		if n == 0 {
+			return fallback
+		}
+		return n
+	}
+	getStr := func(key string, fallback string) string {
+		v, ok := all["ponytail."+key]
+		if !ok || v == "" {
+			return fallback
+		}
+		return v
+	}
+
+	// Defaults match the config defaults.
+	resp := ponytailSettingsResponse{
+		Enabled:         getBool("enabled", false),
+		Mode:            getStr("mode", "balanced"),
+		MinInputTokens:  getInt("min_input_tokens", 12000),
+		MinMessages:     getInt("min_messages", 16),
+		ProtectedWindow: getInt("protected_window", 8),
+		CompressConv:    getBool("compress_conversation", true),
+		CompressCode:    getBool("compress_code", true),
+		Deduplicate:     getBool("deduplicate", true),
+		Metadata:        getBool("metadata", true),
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *adminHandler) putPonytailSettings(w http.ResponseWriter, r *http.Request) {
+	var req ponytailSettingsResponse
+	if !decodeBody(w, r, &req) {
+		return
+	}
+
+	ctx := r.Context()
+	s := h.store.Settings()
+	put := func(key, value string) {
+		if err := s.Put(ctx, "ponytail."+key, value); err != nil {
+			h.logger.Error("failed to save ponytail setting", slog.String("key", key), slog.Any("error", err))
+		}
+	}
+
+	put("enabled", strconv.FormatBool(req.Enabled))
+	put("mode", req.Mode)
+	put("min_input_tokens", strconv.Itoa(req.MinInputTokens))
+	put("min_messages", strconv.Itoa(req.MinMessages))
+	put("protected_window", strconv.Itoa(req.ProtectedWindow))
+	put("compress_conversation", strconv.FormatBool(req.CompressConv))
+	put("compress_code", strconv.FormatBool(req.CompressCode))
+	put("deduplicate", strconv.FormatBool(req.Deduplicate))
+	put("metadata", strconv.FormatBool(req.Metadata))
+
+	h.getPonytailSettings(w, r)
+}
+
+func (h *adminHandler) getPonytailAnalytics(w http.ResponseWriter, _ *http.Request) {
+	if h.ponytailStats == nil {
+		writeJSON(w, http.StatusOK, ponytailAnalyticsResponse{})
+		return
+	}
+	snap := h.ponytailStats.Snapshot()
+
+	var avgComp, avgSaved, avgDur float64
+	if snap.RequestsOptimized > 0 {
+		if snap.TotalOriginal > 0 {
+			avgComp = 1 - float64(snap.TotalTokensSaved)/float64(snap.TotalOriginal)
+		}
+		avgSaved = float64(snap.TotalTokensSaved) / float64(snap.RequestsOptimized)
+		avgDur = float64(snap.TotalDurationMs) / float64(snap.RequestsOptimized)
+	}
+
+	writeJSON(w, http.StatusOK, ponytailAnalyticsResponse{
+		RequestsOptimized: snap.RequestsOptimized,
+		TotalTokensSaved:  snap.TotalTokensSaved,
+		TotalOriginal:     snap.TotalOriginal,
+		TotalOptimized:    snap.TotalOptimized,
+		TotalDurationMs:   snap.TotalDurationMs,
+		AvgCompression:    avgComp,
+		AvgSavedPerReq:    avgSaved,
+		AvgDurationMs:     avgDur,
+	})
 }
 
 // --- helpers ---

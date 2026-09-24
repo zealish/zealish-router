@@ -71,3 +71,18 @@ admin:
   token: ""
   cors_origins:
     - http://localhost:3000
+
+# Ponytail context optimization. Preprocesses chat completion messages to
+# reduce token count before they reach the target LLM.
+ponytail:
+  enabled: false
+  mode: balanced        # conservative | balanced | aggressive
+  thresholds:
+    min_input_tokens: 12000
+    min_messages: 16
+  protected_window: 8
+  compression:
+    conversation: true
+    code: true
+    deduplicate: true
+  metadata: true

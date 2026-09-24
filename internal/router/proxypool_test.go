@@ -54,8 +54,16 @@ func TestNewProviderClientHonoursUseProxyPool(t *testing.T) {
 	}
 
 	direct := storage.Provider{Name: "direct", BaseURL: "http://up", Enabled: true}
-	if transportOf(direct) != nil {
-		t.Error("provider without use_proxy_pool got a proxy transport")
+	dt := transportOf(direct)
+	if dt == nil {
+		t.Fatal("provider without use_proxy_pool got nil transport; expected *http.Transport for timeouts")
+	}
+	directTransport, ok := dt.(*http.Transport)
+	if !ok {
+		t.Fatalf("direct transport = %T, want *http.Transport", dt)
+	}
+	if directTransport.Proxy != nil {
+		t.Error("direct provider has a Proxy func; expected none")
 	}
 
 	pooled := storage.Provider{Name: "pooled", BaseURL: "http://up", Enabled: true, UseProxyPool: true}
@@ -64,9 +72,9 @@ func TestNewProviderClientHonoursUseProxyPool(t *testing.T) {
 	if !ok {
 		t.Fatalf("transport = %T, want *http.Transport with a Proxy func", rt)
 	}
-	u, err := transport.Proxy(nil)
-	if err != nil || u == nil || u.Host != "proxy-a:8080" {
-		t.Errorf("Proxy() = %v, %v; want proxy-a:8080", u, err)
+	up, err := transport.Proxy(nil)
+	if err != nil || up == nil || up.Host != "proxy-a:8080" {
+		t.Errorf("Proxy() = %v, %v; want proxy-a:8080", up, err)
 	}
 }
 

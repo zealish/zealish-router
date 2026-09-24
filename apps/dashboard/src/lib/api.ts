@@ -77,6 +77,12 @@ export const api = {
   post: <T>(path: string, body: unknown) => request<T>("POST", path, body),
   put: <T>(path: string, body: unknown) => request<T>("PUT", path, body),
   del: <T = void>(path: string) => request<T>("DELETE", path),
+  getPonytailSettings: () =>
+    request<Record<string, string>>("GET", "/ponytail/settings"),
+  putPonytailSettings: (s: Record<string, string>) =>
+    request<Record<string, string>>("PUT", "/ponytail/settings", s),
+  getPonytailAnalytics: () =>
+    request<PonytailAnalytics>("GET", "/ponytail/analytics"),
 };
 
 // --- resources, mirroring internal/api/admin.go ---
@@ -478,6 +484,31 @@ export type CacheStats = {
   hit_rate: number;
 };
 
+export type PonytailSettings = {
+  enabled: boolean;
+  mode: "conservative" | "balanced" | "aggressive";
+  thresholds: {
+    min_input_tokens: number;
+    min_messages: number;
+  };
+  protected_window: number;
+  compression: {
+    conversation: boolean;
+    code: boolean;
+    deduplicate: boolean;
+  };
+  metadata: boolean;
+};
+
+export type PonytailAnalytics = {
+  requests_optimized: number;
+  total_tokens_saved: number;
+  avg_tokens_saved: number;
+  total_original_tokens: number;
+  total_optimized_tokens: number;
+  avg_compression_ratio: number;
+  avg_latency_ms: number;
+};
 
 export type Settings = Record<string, string>;
 

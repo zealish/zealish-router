@@ -3,8 +3,10 @@ package router
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/zealish/zealish-router/internal/provider"
 	"github.com/zealish/zealish-router/internal/storage"
@@ -88,12 +90,24 @@ func breakerOverrides(records []storage.Provider, base BreakerPolicy) map[string
 // every compatible upstream speaks. The group decides how the credential is
 // presented: OAuth tokens are always bearer tokens, whatever the dialect.
 func NewProviderClient(rec storage.Provider, pool *ProxyPool) provider.Provider {
-	client := &http.Client{Timeout: rec.Timeout}
+	// Transport-level timeouts keep the connection phase bounded while leaving
+	// the response body read open. http.Client.Timeout would kill streaming
+	// SSE responses mid-read because it covers the entire body read duration.
+	connTimeout := rec.Timeout
+	if connTimeout <= 0 {
+		connTimeout = 30 * time.Second
+	}
+	transport := &http.Transport{
+		DialContext:           (&net.Dialer{Timeout: connTimeout, KeepAlive: 30 * time.Second}).DialContext,
+		TLSHandshakeTimeout:  connTimeout,
+		ResponseHeaderTimeout: connTimeout,
+	}
+	client := &http.Client{Transport: transport}
 	// Providers opted into the proxy pool get a transport that rotates across
 	// the enabled proxies; everyone else keeps the default direct transport.
 	if rec.UseProxyPool {
-		if transport := pool.transport(); transport != nil {
-			client.Transport = transport
+		if poolTransport := pool.transport(); poolTransport != nil {
+			client.Transport = poolTransport
 		}
 	}
 	opts := provider.Options{

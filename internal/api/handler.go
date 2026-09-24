@@ -12,6 +12,7 @@ import (
 	"github.com/zealish/zealish-router/internal/auth"
 	"github.com/zealish/zealish-router/internal/cache"
 	"github.com/zealish/zealish-router/internal/metrics"
+	"github.com/zealish/zealish-router/internal/ponytail"
 	"github.com/zealish/zealish-router/internal/provider"
 	"github.com/zealish/zealish-router/internal/router"
 	"github.com/zealish/zealish-router/internal/stream"
@@ -19,11 +20,13 @@ import (
 )
 
 type handler struct {
-	engine  *router.Engine
-	metrics *metrics.Metrics
-	cache   *cache.Cache
-	logger  *slog.Logger
-	active  *activeRequests
+	engine        *router.Engine
+	metrics       *metrics.Metrics
+	cache         *cache.Cache
+	logger        *slog.Logger
+	active        *activeRequests
+	ponytail      *ponytail.Processor
+	ponytailStats *ponytail.Stats
 }
 
 func newHandler(deps Dependencies, trackers ...*activeRequests) *handler {
@@ -31,7 +34,15 @@ func newHandler(deps Dependencies, trackers ...*activeRequests) *handler {
 	if len(trackers) > 0 && trackers[0] != nil {
 		active = trackers[0]
 	}
-	return &handler{engine: deps.Engine, metrics: deps.Metrics, cache: deps.Cache, logger: deps.Logger, active: active}
+	return &handler{
+		engine:        deps.Engine,
+		metrics:       deps.Metrics,
+		cache:         deps.Cache,
+		logger:        deps.Logger,
+		active:        active,
+		ponytail:      deps.Ponytail,
+		ponytailStats: deps.PonytailStats,
+	}
 }
 
 func (h *handler) trackActive(r *http.Request, model string) func() {
@@ -105,6 +116,29 @@ func (h *handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if !allowModel(w, r, req.Model) {
 		return
 	}
+
+	// Ponytail: preprocess messages before routing.
+	var ponyMeta *ponytail.Metadata
+	if h.shouldPonytail(&req) {
+		start := time.Now()
+		msgs := openaiToMessages(req.Messages)
+		result, err := h.ponytail.Process(r.Context(), msgs)
+		if err != nil {
+			h.logger.Error("ponytail optimization failed, bypassing", slog.Any("error", err))
+		} else if result != nil {
+			req.Messages = messagesToOpenai(result.Messages)
+			ponyMeta = result.Metadata
+			if h.ponytailStats != nil {
+				h.ponytailStats.Record(result.OriginalTokens, result.OptimizedTokens, time.Since(start))
+			}
+			h.logger.Debug("ponytail optimization applied",
+				slog.Int("original_tokens", result.OriginalTokens),
+				slog.Int("optimized_tokens", result.OptimizedTokens),
+				slog.String("mode", h.ponytailMode()),
+			)
+		}
+	}
+
 	cleanup := h.trackActive(r, req.Model)
 	defer cleanup()
 	if req.Stream {
@@ -121,6 +155,17 @@ func (h *handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		h.writeEngineError(w, r, err)
 		return
 	}
+
+	// Inject ponytail metadata into response if available.
+	if ponyMeta != nil {
+		if resp.Extra == nil {
+			resp.Extra = make(map[string]json.RawMessage)
+		}
+		if metaJSON, err := json.Marshal(ponyMeta); err == nil {
+			resp.Extra["ponytail"] = metaJSON
+		}
+	}
+
 	body, err := json.Marshal(resp)
 	if err != nil {
 		h.logger.Error("encode completion", slog.Any("error", err))
@@ -229,4 +274,55 @@ func (h *handler) writeEngineError(w http.ResponseWriter, r *http.Request, err e
 		h.logger.Error("upstream failure", slog.Any("error", err))
 		writeGatewayError(w, r, http.StatusBadGateway, "api_error", "Upstream provider request failed.")
 	}
+}
+
+// shouldPonytail determines whether ponytail optimization should run for this
+// request. Per-request override (req.Extra["ponytail"]) takes precedence over
+// the global config. If ponytail processor is nil, optimization is disabled.
+func (h *handler) shouldPonytail(req *openai.ChatCompletionRequest) bool {
+	if h.ponytail == nil {
+		return false
+	}
+	// Check for per-request override.
+	if raw, ok := req.Extra["ponytail"]; ok {
+		var override bool
+		if err := json.Unmarshal(raw, &override); err == nil {
+			return override
+		}
+	}
+	return h.ponytail.Enabled()
+}
+
+// ponytailMode returns the configured ponytail mode for logging.
+func (h *handler) ponytailMode() string {
+	if h.ponytail == nil {
+		return "disabled"
+	}
+	return h.ponytail.Mode()
+}
+
+// openaiToMessages converts openai.Message slice to ponytail.Message slice.
+func openaiToMessages(msgs []openai.Message) []ponytail.Message {
+	out := make([]ponytail.Message, len(msgs))
+	for i, m := range msgs {
+		out[i] = ponytail.Message{
+			Role:    m.Role,
+			Content: m.Content,
+			Name:    m.Name,
+		}
+	}
+	return out
+}
+
+// messagesToOpenai converts ponytail.Message slice to openai.Message slice.
+func messagesToOpenai(msgs []ponytail.Message) []openai.Message {
+	out := make([]openai.Message, len(msgs))
+	for i, m := range msgs {
+		out[i] = openai.Message{
+			Role:    m.Role,
+			Content: m.Content,
+			Name:    m.Name,
+		}
+	}
+	return out
 }

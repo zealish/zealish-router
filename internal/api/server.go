@@ -16,6 +16,7 @@ import (
 	"github.com/zealish/zealish-router/internal/cache"
 	"github.com/zealish/zealish-router/internal/config"
 	"github.com/zealish/zealish-router/internal/metrics"
+	"github.com/zealish/zealish-router/internal/ponytail"
 	"github.com/zealish/zealish-router/internal/router"
 	"github.com/zealish/zealish-router/internal/storage"
 )
@@ -34,6 +35,10 @@ type Dependencies struct {
 	Cache   *cache.Cache
 	Metrics *metrics.Metrics
 	Logger  *slog.Logger
+	// Ponytail is the request-level context optimizer. Nil disables it.
+	Ponytail *ponytail.Processor
+	// PonytailStats tracks optimization events for the admin API.
+	PonytailStats *ponytail.Stats
 }
 
 // Server wraps the HTTP listener and its lifecycle.

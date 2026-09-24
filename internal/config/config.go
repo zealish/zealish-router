@@ -24,6 +24,7 @@ type Config struct {
 	Admin    Admin    `yaml:"admin"`
 	Router   Router   `yaml:"router"`
 	Cache    Cache    `yaml:"cache"`
+	Ponytail Ponytail `yaml:"ponytail"`
 }
 
 // Cache configures the exact-match response cache. It is off unless both a
@@ -36,6 +37,26 @@ type Cache struct {
 	// MaxEntries caps how many responses are held; the least recently used
 	// entry is evicted past it.
 	MaxEntries int `yaml:"max_entries"`
+}
+
+// Ponytail configures request-level context optimization. When enabled, it
+// preprocesses chat completion messages to reduce token count before they
+// reach the target LLM, preserving semantic fidelity through deduplication,
+// ranking and compression heuristics.
+type Ponytail struct {
+	Enabled  bool   `yaml:"enabled"`
+	Mode     string `yaml:"mode"` // conservative, balanced, aggressive
+	Thresholds struct {
+		MinInputTokens int `yaml:"min_input_tokens"`
+		MinMessages    int `yaml:"min_messages"`
+	} `yaml:"thresholds"`
+	ProtectedWindow int `yaml:"protected_window"`
+	Compression     struct {
+		Conversation bool `yaml:"conversation"`
+		Code         bool `yaml:"code"`
+		Deduplicate  bool `yaml:"deduplicate"`
+	} `yaml:"compression"`
+	Metadata bool `yaml:"metadata"`
 }
 
 // Router configures the routing engine's resilience policy.
@@ -127,6 +148,28 @@ func Default() *Config {
 		},
 		// Defaults so turning the cache on only takes `enabled: true`.
 		Cache: Cache{TTL: 5 * time.Minute, MaxEntries: 1024},
+		Ponytail: Ponytail{
+			Enabled:         false,
+			Mode:            "balanced",
+			ProtectedWindow: 8,
+			Thresholds: struct {
+				MinInputTokens int `yaml:"min_input_tokens"`
+				MinMessages    int `yaml:"min_messages"`
+			}{
+				MinInputTokens: 12000,
+				MinMessages:    16,
+			},
+			Compression: struct {
+				Conversation bool `yaml:"conversation"`
+				Code         bool `yaml:"code"`
+				Deduplicate  bool `yaml:"deduplicate"`
+			}{
+				Conversation: true,
+				Code:         true,
+				Deduplicate:  true,
+			},
+			Metadata: true,
+		},
 	}
 }
 
@@ -187,6 +230,22 @@ func (c *Config) Validate() error {
 	}
 	if c.Admin.Enabled && c.Admin.Token == "" {
 		return errors.New("config: admin.token is required when admin.enabled is true")
+	}
+	if c.Ponytail.Enabled {
+		switch c.Ponytail.Mode {
+		case "conservative", "balanced", "aggressive":
+		default:
+			return fmt.Errorf("config: invalid ponytail.mode %q, must be conservative, balanced or aggressive", c.Ponytail.Mode)
+		}
+		if c.Ponytail.Thresholds.MinInputTokens < 0 {
+			return fmt.Errorf("config: invalid ponytail.thresholds.min_input_tokens %d", c.Ponytail.Thresholds.MinInputTokens)
+		}
+		if c.Ponytail.Thresholds.MinMessages < 0 {
+			return fmt.Errorf("config: invalid ponytail.thresholds.min_messages %d", c.Ponytail.Thresholds.MinMessages)
+		}
+		if c.Ponytail.ProtectedWindow < 0 {
+			return fmt.Errorf("config: invalid ponytail.protected_window %d", c.Ponytail.ProtectedWindow)
+		}
 	}
 	return nil
 }
